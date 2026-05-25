@@ -1,7 +1,6 @@
 import javax.swing.*;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Game flow controller. Holds the live `Board`, the game mode, and the
@@ -40,13 +39,25 @@ public class GameController {
 
     private Side whiteSide = Side.HUMAN;
     private Side blackSide = Side.ENGINE;
-    private int  engineDepth = 6;
-    private int  engineTtBits = 20;
+    /** Per-side engine settings (depth, TT, weights, defender scale).
+     *  Whichever side the engine controls reads its settings here. */
+    private EngineSettings whiteSettings = EngineSettings.defaults();
+    private EngineSettings blackSettings = EngineSettings.defaults();
 
     /** True between SwingWorker.start and done. EDT-only. */
     private boolean thinkingNow = false;
-    /** A flag the worker checks to bail early on new-game. */
-    private final AtomicBoolean cancelFlag = new AtomicBoolean(false);
+    /**
+     * Generation token. Bumped whenever state is reset (newGame, setSides,
+     * loadGame, loadPosition). A worker snapshots the current generation at
+     * launch and discards its result on `done()` if the generation has moved
+     * on — meaning the world it was reasoning about no longer exists.
+     *
+     * This is more robust than a single cancel flag because it survives the
+     * cancel→reset-flag cycle: even if newGame() clears any signal before the
+     * old worker's done() runs, the worker still sees that its generation is
+     * stale and discards.
+     */
+    private long currentGeneration = 0L;
 
     /** For human play: currently selected source square, or -1. */
     private int  selectedSq = -1;
@@ -64,13 +75,13 @@ public class GameController {
     /* ----- public API used by Gui ----- */
 
     public void newGame() {
-        cancelFlag.set(true);
+        currentGeneration++;
         thinkingNow = false;
         board = Board.initial();
         playedMoves.clear();
         lastFromSq = -1; lastToSq = -1;
         selectedSq = -1; destinations = 0L;
-        cancelFlag.set(false);
+        
         fireBoardChanged();
         updateStatus();
         maybeKickEngine();
@@ -82,7 +93,7 @@ public class GameController {
      * IllegalArgumentException if any move in the list is illegal at its turn.
      */
     public void loadGame(java.util.List<Move> moves) {
-        cancelFlag.set(true);
+        currentGeneration++;
         thinkingNow = false;
         Board b = Board.initial();
         for (int i = 0; i < moves.size(); i++) {
@@ -115,7 +126,7 @@ public class GameController {
             lastFromSq = -1; lastToSq = -1;
         }
         selectedSq = -1; destinations = 0L;
-        cancelFlag.set(false);
+        
         fireBoardChanged();
         updateStatus();
         byte w = board.winner();
@@ -132,13 +143,13 @@ public class GameController {
      * is cleared (we don't know what moves led to this position).
      */
     public void loadPosition(Board newBoard) {
-        cancelFlag.set(true);
+        currentGeneration++;
         thinkingNow = false;
         board = newBoard;
         playedMoves.clear();
         lastFromSq = -1; lastToSq = -1;
         selectedSq = -1; destinations = 0L;
-        cancelFlag.set(false);
+        
         fireBoardChanged();
         updateStatus();
         byte w = board.winner();
@@ -150,11 +161,11 @@ public class GameController {
     }
 
     public void setSides(Side white, Side black) {
-        cancelFlag.set(true);
+        currentGeneration++;
         thinkingNow = false;
         whiteSide = white;
         blackSide = black;
-        cancelFlag.set(false);
+        
         updateStatus();
         maybeKickEngine();
     }
@@ -162,9 +173,14 @@ public class GameController {
     public Side whiteSide() { return whiteSide; }
     public Side blackSide() { return blackSide; }
 
-    public void setEngineDepth(int d)  { this.engineDepth  = d; }
-    public void setEngineTtBits(int t) { this.engineTtBits = t; }
-    public int  engineDepth()          { return engineDepth; }
+    public EngineSettings whiteSettings() { return whiteSettings; }
+    public EngineSettings blackSettings() { return blackSettings; }
+    public void setWhiteSettings(EngineSettings s) { this.whiteSettings = s; }
+    public void setBlackSettings(EngineSettings s) { this.blackSettings = s; }
+    public void resetSettings() {
+        this.whiteSettings = EngineSettings.defaults();
+        this.blackSettings = EngineSettings.defaults();
+    }
 
     public Board board() { return board; }
     public int   selectedSq()   { return selectedSq; }
@@ -286,29 +302,32 @@ public class GameController {
         // Capture the current state for the worker — clone via FEN so the
         // worker's mutations don't alias the EDT-owned board.
         final String fen = board.toFen();
-        final int   depth  = engineDepth;
-        final int   ttBits = engineTtBits;
+        final EngineSettings cfg = (board.side() == Board.WHITE) ? whiteSettings : blackSettings;
+        final long generation = currentGeneration;
         thinkingNow = true;
         updateStatus();
 
         SwingWorker<Move, String> worker = new SwingWorker<>() {
             @Override protected Move doInBackground() {
                 Board copy = Board.fromFen(fen);
-                Search s = new Search(ttBits, Evaluator.defaults());
+                Search s = cfg.buildSearch();
                 long t0 = System.currentTimeMillis();
-                Search.Result r = s.findBest(copy, depth);
+                Search.Result r = s.findBest(copy, cfg.depth);
                 long ms = System.currentTimeMillis() - t0;
                 publish(String.format("depth=%d  best=%s  score=%+d  nodes=%d  %d ms",
                                        r.depth, r.bestMove, r.score, r.nodes, ms));
                 return r.bestMove;
             }
             @Override protected void process(List<String> lines) {
-                // Forward intermediate engine output to the listener.
+                // Suppress progress lines from stale workers — they'd corrupt
+                // the engine-output panel by reporting about a now-defunct
+                // position.
+                if (generation != currentGeneration) return;
                 if (listener != null) for (String l : lines) listener.engineProgress(l);
             }
             @Override protected void done() {
                 thinkingNow = false;
-                if (cancelFlag.get()) { updateStatus(); return; }   // user reset mid-think
+                if (generation != currentGeneration) { updateStatus(); return; }
                 try {
                     Move m = get();
                     if (m != null) applyMove(m);
@@ -337,7 +356,10 @@ public class GameController {
         }
         String stm   = (board.side() == Board.WHITE) ? "White" : "Black";
         String controller = (sideToMoveIsEngine() ? "engine" : "human");
-        if (thinkingNow) listener.statusChanged("Engine thinking ("+stm+", depth "+engineDepth+")...");
-        else             listener.statusChanged(stm + " to move (" + controller + ")");
+        if (thinkingNow) {
+            int d = (board.side() == Board.WHITE) ? whiteSettings.depth : blackSettings.depth;
+            listener.statusChanged("Engine thinking (" + stm + ", depth " + d + ")...");
+        }
+        else listener.statusChanged(stm + " to move (" + controller + ")");
     }
 }

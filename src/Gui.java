@@ -119,11 +119,13 @@ public class Gui extends JFrame implements GameController.Listener {
         mb.add(mode);
 
         // Engine
+        // "Machine Player 1" = the engine when it plays White (matching Mode menu).
+        // "Machine Player 2" = the engine when it plays Black.
         JMenu engine = new JMenu("Engine");
-        engine.add(stub("Machine Player 1 Settings"));
-        engine.add(stub("Machine Player 2 Settings"));
+        engine.add(action("Machine Player 1 Settings...", 0, e -> openSettings(true)));
+        engine.add(action("Machine Player 2 Settings...", 0, e -> openSettings(false)));
         engine.addSeparator();
-        engine.add(stub("Reset to default Settings"));
+        engine.add(action("Reset to default Settings",    0, e -> resetSettings()));
         mb.add(engine);
 
         // Help
@@ -164,6 +166,35 @@ public class Gui extends JFrame implements GameController.Listener {
             "Breakthrough GUI\n\nFront-end for the Breakthrough engine.\n"
           + "Click a piece to select it, then click a destination to move.",
             "About Breakthrough", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    /* ----- Engine: Settings ----- */
+
+    /**
+     * Open the engine settings dialog for one side.
+     * @param white  true → edit Machine Player 1 (the White engine);
+     *               false → edit Machine Player 2 (the Black engine).
+     */
+    private void openSettings(boolean white) {
+        String title = white ? "Machine Player 1 Settings (White)"
+                             : "Machine Player 2 Settings (Black)";
+        EngineSettings current = white ? controller.whiteSettings()
+                                        : controller.blackSettings();
+        EngineSettings updated = EngineSettingsDialog.show(this, title, current);
+        if (updated == null) return;  // user cancelled
+
+        if (white) controller.setWhiteSettings(updated);
+        else       controller.setBlackSettings(updated);
+        status.setText((white ? "MP1" : "MP2") + " settings updated: " + updated);
+    }
+
+    private void resetSettings() {
+        int r = JOptionPane.showConfirmDialog(this,
+            "Reset both engines to default settings?",
+            "Confirm reset", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (r != JOptionPane.YES_OPTION) return;
+        controller.resetSettings();
+        status.setText("Both engines reset to default settings.");
     }
 
     /* ----- File: Load / Save ----- */

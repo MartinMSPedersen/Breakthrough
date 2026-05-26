@@ -1,8 +1,9 @@
 # Breakthrough GUI
 
-Swing front-end for the Breakthrough engine. Same engine code as the
-CLI project (`Search`, `Evaluator`, `Board`, etc.), with a graphical
-board and menu-driven interface on top.
+Swing front-end for the Breakthrough engine. Reuses the engine code
+from the CLI project (`Search`, `Evaluator`, `Board`, `MoveGenerator`,
+etc.) verbatim; adds a graphical board, a menu, an engine output
+panel, and a settings dialog on top.
 
 ## Build & run
 
@@ -11,37 +12,212 @@ make          # compile everything to build/
 make gui      # launch the GUI
 ```
 
-Requires JDK 21 (uses the same features as the CLI: records, switch
-expressions). No external dependencies — Swing is in the JDK.
+Requires JDK 21 (records, switch expressions, pattern matching). No
+external dependencies — Swing is in the JDK.
 
-## What's in v1
+The CLI tools from the engine project (`Main play`, `Main analyse`,
+`Main benchmark`, `Tuner`) also work in this directory: `make play`,
+`make bench`, `make tune`, etc. The GUI doesn't depend on them, but
+they're useful for sanity-checking the engine after any changes.
 
-- **Board view**: click a piece to select, then click a destination
-  square (highlighted in green) to play the move. Click the selected
-  piece again to deselect. The last move is highlighted in yellow.
-- **Menu structure**: all menus from the spec are present so the
-  layout is set. Items not yet implemented show a "not implemented"
-  dialog.
-- **File → New Game** resets to the starting position.
-- **File → Quit** exits.
-- **View → Flip View** rotates the board (so Black's home row is at
-  the bottom).
-- **Mode → Machine Player 1**: engine plays White, human plays Black.
-- **Mode → Machine Player 2**: human plays White, engine plays Black
-  (the default at startup).
-- **Mode → Two Machines**: engine vs engine; press *File → New Game*
-  to watch.
-- **Help → About**: brief blurb.
+## At a glance
 
-The engine runs on a background thread (Swing `SwingWorker`) so the
-UI stays responsive during deep searches.
+- **Click to play**: click a piece to select it, click a green-highlighted
+  square to move there.
+- **Or drag and drop**: press on a piece, drag, release on the destination.
+  Dropping outside the board or on an illegal square snaps the piece back.
+- **Last move** is shown in yellow, **selected square** in blue, **legal
+  destinations** in green.
+- **Coordinates** (a-h, 1-8) drawn around the board.
+- **Flip view** to see the position from Black's side.
+- **Engine output panel** on the right shows what each engine is thinking,
+  with MP1/MP2 labels and timestamps.
+- **Per-engine settings** for depth, TT size, weights, defender scale.
+- **Analyse Mode** runs the engine continuously on the current position,
+  streaming each iteration's depth/score/best move.
+- **Four color themes** — Classic, Slate, High Contrast, Sepia.
+- **Load and save** games (`.game`) and positions (`.fen`); compatible
+  with the CLI tools' file formats.
 
-## What's coming
+## Menu reference
 
-- **v2**: Engine output side panel, Analyse Mode, evaluation graph.
-- **v3**: Load/Save game and position (reusing the existing `.game`
-  and FEN formats), Edit Position, per-engine settings dialogs,
-  Annotate Mode.
+### File
+
+- **New Game** (Ctrl+N) — reset to the starting position.
+- **Load Game...** (Ctrl+O) — open a saved `.game` file. The moves are
+  replayed; if the engine is configured to play the current side, it
+  starts thinking from there.
+- **Load Position...** — load a FEN-style `.fen` file. Move history is
+  cleared (we don't know what led to the position).
+- **Save Game...** (Ctrl+S) — save the played moves. Defaults to a
+  timestamped filename like `breakthrough-2026-05-25_22-15-30.game` in
+  `./saves/`. Same format as the CLI's autosave.
+- **Save Position...** — write the current FEN to a `.fen` file.
+- **Quit** (Ctrl+Q).
+
+### View
+
+- **Flip View** — rotate the board 180°. Coordinate labels follow.
+- **Coordinates** (default on) — show file letters and rank numbers.
+- **Engine Output** (default on) — toggle the right-side output panel.
+- **Evaluation Graph** — stub, see "Not yet" below.
+- **Colors** — submenu with four theme presets:
+  - **Classic** — warm brown wood (default).
+  - **Slate** — cool gray-blue, modern.
+  - **High Contrast** — pure white squares, dark gray squares, bright
+    primary-color highlights, white piece edges. Accessibility-oriented.
+  - **Sepia** — cream and caramel, low-glare for long sessions.
+  
+  Themes affect the board and the engine output panel; menu chrome and
+  dialogs use the system look-and-feel.
+
+### Mode
+
+Four radio-button modes; the active one drives gameplay.
+
+- **Machine Player 1** — engine plays White, you play Black.
+- **Machine Player 2** — you play White, engine plays Black (default).
+- **Two Machines** — engine vs engine; press *New Game* and watch.
+- **Analyse Mode** — engine searches the current position continuously,
+  emitting an iteration to the output panel for each depth. You can
+  click pieces for either side to explore variations; analysis
+  restarts on the new position. Leaving this mode cancels the search.
+
+The fifth menu item, **Annotate Game**, is a placeholder — see "Not
+yet" below.
+
+### Engine
+
+- **Machine Player 1 Settings...** — open a dialog editing the White
+  engine's depth (1-15), TT size in bits (16-26, with live RAM hint),
+  evaluator weights, and defender scale.
+- **Machine Player 2 Settings...** — same for the Black engine.
+- **Reset to default Settings** — restore both engines to the
+  compiled-in defaults.
+
+### Help
+
+- **About** — version blurb.
+
+## Engine output panel
+
+A scrolling text area on the right showing engine activity. Each line
+is timestamped and labeled:
+
+```
+22:14:03  --   New game
+22:14:03  --   Mode: Two Machines
+22:14:03  MP1  depth=6  best=a2a3  score=+4  nodes=32403  46 ms
+22:14:03  MP2  depth=6  best=h7h6  score=+0  nodes=28115  41 ms
+22:14:04  MP1  depth=6  best=a3a4  score=+8  nodes=29002  38 ms
+...
+22:14:08  --   Game over: White wins on move 30
+```
+
+- **MP1** = the engine when it plays White; **MP2** = the engine when
+  it plays Black. (Matches the Mode menu naming.)
+- Lines beginning with `--` are notes (mode changes, new games, game
+  over).
+- Capped at 500 lines; older lines are trimmed in batches. The Clear
+  button resets the panel.
+- In Analyse Mode, each iteration of iterative deepening produces one
+  line, so you see depth 1, 2, 3, ... as they complete.
+
+## Engine settings dialog
+
+Four fields:
+
+- **Search depth** — spinner, 1 to 15. Higher = stronger but slower.
+  6 is interactive; 8-10 is much stronger; 11+ takes noticeable time.
+- **TT size (bits)** — spinner, 16 to 26 (2^N entries). Bigger TT
+  helps at deep search; a live hint shows the implied RAM. Default
+  20 (1M entries, ~32 MB) suits depth ≤10.
+- **Evaluator weights** — text field, eight comma-separated integers
+  (one per advancement row). Validated on OK; bad input re-opens the
+  dialog with the same values for editing.
+- **Defender scale** — spinner, 0.0 to 2.0 in 0.05 steps. Multiplier
+  on the defender-count evaluator term. Default 0 (term disabled).
+
+Settings apply immediately — the next time the relevant engine plays,
+it uses the new values. Each setting is independent per side, so you
+can put two different evaluators in a Two Machines matchup and watch
+them play each other.
+
+## How it's wired
+
+- `Gui.java` — JFrame, menu bar, status bar, JSplitPane holding the
+  board on the left and the engine output panel on the right.
+- `BoardPanel.java` — custom-painted 8×8 board. Handles click-to-move,
+  drag-and-drop, highlight overlays, coordinate labels. Stateless
+  beyond what the controller hands it (plus transient drag state).
+- `EngineOutputPanel.java` — JTextArea in a JScrollPane with
+  timestamping, MP1/MP2 labeling, and a line cap.
+- `EngineSettingsDialog.java` — modal settings form, validated on OK.
+- `EngineSettings.java` — value type holding depth/TT/weights/scale;
+  builds an `Evaluator` and `Search` on demand.
+- `Theme.java` — value class bundling the 12 themable colors, plus
+  four preset palettes.
+- `GameController.java` — the glue between view and engine. Holds the
+  live `Board` and move history. Decides what clicks mean. Runs the
+  engine on background threads (SwingWorker for normal play, a daemon
+  thread for Analyse Mode). Uses a generation token to invalidate any
+  in-flight workers when state changes (new game, load, mode switch,
+  settings change), so the engine can never apply a move to a position
+  that no longer exists.
+- Engine sources (`Search`, `Evaluator`, `Board`, etc.) are copied
+  in unchanged from the CLI project — except `Search.findBest`, which
+  was extended in this GUI tree to support cancellation and per-iteration
+  callbacks. Both extensions are also useful for the CLI and could be
+  upstreamed.
+
+## Threading model
+
+The EDT owns all UI state, including the `Board` instance in the
+controller. The engine never touches anything the EDT can see; instead:
+
+- For a normal-play engine move, a `SwingWorker` clones the board (via
+  FEN round-trip), runs the search, and posts the resulting `Move` back
+  to the EDT in `done()`. The EDT applies the move.
+- For Analyse Mode, a daemon thread runs the iterative-deepening loop.
+  Per-iteration callbacks fire on the search thread but are immediately
+  re-posted to the EDT via `SwingUtilities.invokeLater` before they
+  touch any UI.
+
+State changes (new game, load, mode switch, settings change) bump a
+`currentGeneration` counter on the EDT. Each worker snapshots the
+counter at launch; on completion it discards its result if the counter
+has moved on. This makes mid-think mode changes race-free.
+
+For Analyse Mode specifically, there's also an `AtomicBoolean` cancel
+flag that the search consults periodically (every ~4096 nodes), so the
+search bails out in milliseconds when the user switches mode or makes
+a move. The completed iterations' best moves are returned; the
+partial iteration is discarded and the TT is wiped to prevent
+poisoning future searches with half-explored entries.
+
+## File formats
+
+The same formats the CLI uses, so files are interchangeable.
+
+**Game file** (`.game`): free-form text with move tokens like `b2b3`,
+optional `#` comments, and an optional header block (saved date, ply
+count, result). One token per ply, whitespace-separated.
+
+**Position file** (`.fen`): one line of FEN-style notation, e.g.
+`OOOOOOOO/OOOOOOOO/8/8/8/8/XXXXXXXX/XXXXXXXX W`. Ranks from 8 down to
+1, `/` separated; `X` = White, `O` = Black, digits = run of empties;
+trailing `W` or `B` is the side to move. Optional `#` comments are
+ignored.
+
+## Not yet
+
+- **Edit → Edit Tags**, **Edit → Edit Position** — stubs.
+- **Mode → Annotate Game** — stub. The intended behavior is to load a
+  saved game and walk through it ply by ply, with the engine
+  evaluating each position and pointing out moves where its best
+  diverges from the game move.
+- **View → Evaluation Graph** — stub. A small chart of the engine's
+  evaluation across the played moves.
 
 ## Layout
 
@@ -50,21 +226,27 @@ Breakthrough-GUI/
 ├── Makefile
 ├── README.md
 ├── src/
-│   ├── Gui.java                    # JFrame, menus, status bar
-│   ├── BoardPanel.java             # Custom-painted 8x8 board
-│   ├── GameController.java         # Click handling, engine threading
+│   ├── Gui.java                    GUI entry point, menus, status bar
+│   ├── BoardPanel.java             Custom-painted board (click + drag)
+│   ├── EngineOutputPanel.java      Right-side scrolling output panel
+│   ├── EngineSettings.java         Per-engine config value type
+│   ├── EngineSettingsDialog.java   Modal settings dialog
+│   ├── GameController.java         View ↔ engine glue, threading
+│   ├── Theme.java                  Color themes
 │   │
-│   ├── Bitboards.java              # Engine sources (copied from CLI project)
+│   ├── Bitboards.java              ── Engine, copied from CLI project ──
 │   ├── Board.java
 │   ├── Evaluator.java
+│   ├── GameReplay.java
+│   ├── GameWriter.java
+│   ├── Main.java                   (CLI entry, not used by the GUI)
 │   ├── Move.java
 │   ├── MoveGenerator.java
 │   ├── PositionIO.java
-│   ├── Search.java
+│   ├── Search.java                 (extended with cancel + iteration callbacks)
 │   ├── TT.java
-│   ├── Tuner.java
-│   ├── Zobrist.java
-│   ├── GameReplay.java
-│   ├── GameWriter.java
-│   └── Main.java                   # CLI; not used by the GUI but kept for tests
+│   ├── Tuner.java                  (CLI tuner, not used by the GUI)
+│   └── Zobrist.java
+├── saves/                          created on first save
+└── positions/                      created on first save
 ```

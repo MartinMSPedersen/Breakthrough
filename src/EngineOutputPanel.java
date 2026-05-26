@@ -30,10 +30,8 @@ public class EngineOutputPanel extends JPanel {
         // Monospace font: the engine lines have aligned columns that read
         // much better with a fixed-width font.
         area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        area.setBackground(new Color(0x1E1E1E));
-        area.setForeground(new Color(0xE0E0E0));
-        area.setCaretColor(new Color(0xE0E0E0));
         area.setMargin(new Insets(4, 6, 4, 6));
+        setTheme(Theme.CLASSIC);
 
         JScrollPane sp = new JScrollPane(area,
             JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
@@ -46,6 +44,13 @@ public class EngineOutputPanel extends JPanel {
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 2));
         buttons.add(clear);
         add(buttons, BorderLayout.SOUTH);
+    }
+
+    /** Apply a theme. Affects background and text colors of the output area. */
+    public void setTheme(Theme t) {
+        area.setBackground(t.outputBg);
+        area.setForeground(t.outputFg);
+        area.setCaretColor(t.outputFg);
     }
 
     /** Append a labeled engine line. Must be called on the EDT. */

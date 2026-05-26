@@ -21,16 +21,14 @@ public class BoardPanel extends JPanel {
 
     public interface SquareClickListener { void squareClicked(int row, int col); }
 
-    /* ----- colors ----- */
-    private static final Color  LIGHT_SQ  = new Color(0xEED9B5);
-    private static final Color  DARK_SQ   = new Color(0xB58863);
-    private static final Color  SEL_SQ    = new Color(0x6B, 0xAE, 0xD6, 0xB0);
-    private static final Color  HL_DEST   = new Color(0x66, 0xBB, 0x6A, 0xA0);
-    private static final Color  LAST_MV   = new Color(0xFF, 0xEB, 0x3B, 0x80);
-    private static final Color  WHITE_PC  = new Color(0xF5F5F5);
-    private static final Color  BLACK_PC  = new Color(0x2E2E2E);
-    private static final Color  PC_EDGE   = new Color(0x202020);
-    private static final Color  LABEL     = new Color(0xC8C8C8);
+    /* ----- theme ----- */
+    private Theme theme = Theme.CLASSIC;
+    public void setTheme(Theme t) {
+        this.theme = t;
+        setBackground(t.panelBg);
+        repaint();
+    }
+    public Theme theme() { return theme; }
 
     /* ----- model snapshot ----- */
     private Board       board       = Board.initial();
@@ -63,7 +61,7 @@ public class BoardPanel extends JPanel {
 
     public BoardPanel() {
         setPreferredSize(new Dimension(560, 560));
-        setBackground(new Color(0x303030));
+        setBackground(theme.panelBg);
         MouseAdapter h = new MouseAdapter() {
             @Override public void mousePressed(MouseEvent e) {
                 int sq = squareAt(e.getX(), e.getY());
@@ -167,23 +165,23 @@ public class BoardPanel extends JPanel {
             for (int c = 0; c < 8; c++) {
                 int sx = x0 + c * cell;
                 int sy = y0 + (flipped ? r : (7 - r)) * cell;
-                g.setColor(((r + c) & 1) == 0 ? DARK_SQ : LIGHT_SQ);
+                g.setColor(((r + c) & 1) == 0 ? theme.darkSq : theme.lightSq);
                 g.fillRect(sx, sy, cell, cell);
             }
         }
 
         // Last-move highlight
-        if (lastFromSq >= 0) paintSquareOverlay(g, lastFromSq, x0, y0, cell, LAST_MV);
-        if (lastToSq   >= 0) paintSquareOverlay(g, lastToSq,   x0, y0, cell, LAST_MV);
+        if (lastFromSq >= 0) paintSquareOverlay(g, lastFromSq, x0, y0, cell, theme.lastMv);
+        if (lastToSq   >= 0) paintSquareOverlay(g, lastToSq,   x0, y0, cell, theme.lastMv);
 
         // Selected square
-        if (selectedSq >= 0) paintSquareOverlay(g, selectedSq, x0, y0, cell, SEL_SQ);
+        if (selectedSq >= 0) paintSquareOverlay(g, selectedSq, x0, y0, cell, theme.selSq);
 
         // Highlighted destinations
         long bb = highlights;
         while (bb != 0L) {
             int sq = Long.numberOfTrailingZeros(bb);
-            paintSquareOverlay(g, sq, x0, y0, cell, HL_DEST);
+            paintSquareOverlay(g, sq, x0, y0, cell, theme.hlDest);
             bb &= bb - 1L;
         }
 
@@ -199,9 +197,9 @@ public class BoardPanel extends JPanel {
                 int sy = y0 + (flipped ? r : (7 - r)) * cell;
                 int pad = Math.max(4, cell / 8);
                 int d = cell - 2 * pad;
-                g.setColor(p == Board.WHITE ? WHITE_PC : BLACK_PC);
+                g.setColor(p == Board.WHITE ? theme.whitePc : theme.blackPc);
                 g.fillOval(sx + pad, sy + pad, d, d);
-                g.setColor(PC_EDGE);
+                g.setColor(theme.pcEdge);
                 g.setStroke(new BasicStroke(Math.max(1f, cell / 28f)));
                 g.drawOval(sx + pad, sy + pad, d, d);
             }
@@ -210,7 +208,7 @@ public class BoardPanel extends JPanel {
         // File/rank labels — drawn in the margin around the board.
         // The margin is always present so toggling labels doesn't resize the board.
         if (showLabels) {
-            g.setColor(LABEL);
+            g.setColor(theme.label);
             g.setFont(getFont().deriveFont(Font.PLAIN, Math.max(10f, cell / 5f)));
             FontMetrics fm = g.getFontMetrics();
             for (int c = 0; c < 8; c++) {
@@ -235,9 +233,9 @@ public class BoardPanel extends JPanel {
                 int d   = cell - 2 * pad;
                 int dx  = dragX - d / 2;
                 int dy  = dragY - d / 2;
-                g.setColor(p == Board.WHITE ? WHITE_PC : BLACK_PC);
+                g.setColor(p == Board.WHITE ? theme.whitePc : theme.blackPc);
                 g.fillOval(dx, dy, d, d);
-                g.setColor(PC_EDGE);
+                g.setColor(theme.pcEdge);
                 g.setStroke(new BasicStroke(Math.max(1f, cell / 28f)));
                 g.drawOval(dx, dy, d, d);
             }

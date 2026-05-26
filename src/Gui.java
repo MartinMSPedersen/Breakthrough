@@ -110,7 +110,7 @@ public class Gui extends JFrame implements GameController.Listener {
         engOut.addActionListener(e -> setEngineOutputVisible(engOut.isSelected()));
         view.add(engOut);
         view.add(stub("Evaluation Graph"));
-        view.add(stub("Colors"));
+        view.add(buildColorsMenu());
         mb.add(view);
 
         // Mode
@@ -182,6 +182,27 @@ public class Gui extends JFrame implements GameController.Listener {
         mi.setToolTipText(tip);
         mi.addActionListener(e -> action.run());
         return mi;
+    }
+
+    /** Build View → Colors submenu. One radio per theme; Classic preselected. */
+    private JMenu buildColorsMenu() {
+        JMenu colors = new JMenu("Colors");
+        ButtonGroup bg = new ButtonGroup();
+        for (Theme t : Theme.ALL) {
+            JRadioButtonMenuItem mi = new JRadioButtonMenuItem(t.name);
+            if (t == Theme.CLASSIC) mi.setSelected(true);
+            mi.addActionListener(e -> applyTheme(t));
+            bg.add(mi);
+            colors.add(mi);
+        }
+        return colors;
+    }
+
+    /** Push a theme out to every panel that paints. */
+    private void applyTheme(Theme t) {
+        boardPanel.setTheme(t);
+        outputPanel.setTheme(t);
+        outputPanel.note("Theme: " + t.name);
     }
 
     private void showAbout() {

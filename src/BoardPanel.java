@@ -24,9 +24,9 @@ public class BoardPanel extends JPanel {
     /* ----- colors ----- */
     private static final Color  LIGHT_SQ  = new Color(0xEED9B5);
     private static final Color  DARK_SQ   = new Color(0xB58863);
-    private static final Color  SEL_SQ    = new Color(0x6BAED6, true);
-    private static final Color  HL_DEST   = new Color(0x66BB6A, true);
-    private static final Color  LAST_MV   = new Color(0xFFEB3B, true);
+    private static final Color  SEL_SQ    = new Color(0x6B, 0xAE, 0xD6, 0xB0);
+    private static final Color  HL_DEST   = new Color(0x66, 0xBB, 0x6A, 0xA0);
+    private static final Color  LAST_MV   = new Color(0xFF, 0xEB, 0x3B, 0x80);
     private static final Color  WHITE_PC  = new Color(0xF5F5F5);
     private static final Color  BLACK_PC  = new Color(0x2E2E2E);
     private static final Color  PC_EDGE   = new Color(0x202020);
@@ -41,14 +41,95 @@ public class BoardPanel extends JPanel {
     private boolean     flipped     = false;
     private boolean     showLabels  = true;
 
+    /* ----- drag state -----
+     * Two phases of a mouse-down gesture:
+     *   1. Pressed:  pressSq != -1, dragging == false.  Click on release plays
+     *                through as a normal click-select / click-move.
+     *   2. Dragging: pressSq != -1, dragging == true.   The piece on pressSq
+     *                is hidden during paint and a floating piece tracks the
+     *                cursor (dragX, dragY). Release acts on the destination
+     *                square (or snap back if dropped outside the board / on
+     *                an illegal square).
+     * The threshold (in pixels) keeps tiny mouse jitter during a click from
+     * being misclassified as a drag.
+     */
+    private static final int DRAG_THRESHOLD = 5;
+    private int         pressSq     = -1;
+    private int         pressX, pressY;
+    private boolean     dragging    = false;
+    private int         dragX, dragY;
+
     private SquareClickListener listener;
 
     public BoardPanel() {
         setPreferredSize(new Dimension(560, 560));
         setBackground(new Color(0x303030));
-        addMouseListener(new MouseAdapter() {
-            @Override public void mousePressed(MouseEvent e) { onClick(e.getX(), e.getY()); }
-        });
+        MouseAdapter h = new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e) {
+                int sq = squareAt(e.getX(), e.getY());
+                if (sq < 0) return;
+                pressSq = sq;
+                pressX  = e.getX();
+                pressY  = e.getY();
+                dragging = false;
+                // Notify the controller of the press as a "click" — this
+                // selects the piece (or deselects, depending on state).
+                if (listener != null) listener.squareClicked(sq >>> 3, sq & 7);
+            }
+            @Override public void mouseDragged(MouseEvent e) {
+                if (pressSq < 0) return;
+                dragX = e.getX();
+                dragY = e.getY();
+                if (!dragging) {
+                    int dx = dragX - pressX, dy = dragY - pressY;
+                    if (dx*dx + dy*dy >= DRAG_THRESHOLD * DRAG_THRESHOLD) {
+                        // Only enter drag mode if a real piece-of-our-own was
+                        // selected by the press. If the controller didn't pick
+                        // up the press (selectedSq still -1), this is not a
+                        // valid drag — ignore.
+                        if (selectedSq == pressSq) {
+                            dragging = true;
+                            setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
+                        }
+                    }
+                }
+                if (dragging) repaint();
+            }
+            @Override public void mouseReleased(MouseEvent e) {
+                int releaseSq = squareAt(e.getX(), e.getY());
+                boolean wasDragging = dragging;
+                int srcSq = pressSq;
+                pressSq = -1;
+                dragging = false;
+                setCursor(Cursor.getDefaultCursor());
+                if (wasDragging) {
+                    if (releaseSq == srcSq || releaseSq < 0) {
+                        // Dropped on source or outside the board: just snap
+                        // back. The controller still has selectedSq == srcSq;
+                        // we leave it that way so the user can click a
+                        // destination if they want.
+                        repaint();
+                        return;
+                    }
+                    // Dropped elsewhere — communicate as a click on the
+                    // destination. The controller decides whether it's legal.
+                    if (listener != null) listener.squareClicked(releaseSq >>> 3, releaseSq & 7);
+                }
+                // If !wasDragging, mousePressed already fired the click;
+                // a plain release does nothing further.
+            }
+            @Override public void mouseMoved(MouseEvent e) {
+                int sq = squareAt(e.getX(), e.getY());
+                Cursor c = Cursor.getDefaultCursor();
+                if (sq >= 0) {
+                    byte p = board.get(sq >>> 3, sq & 7);
+                    if (p == board.side()) c = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR);
+                }
+                if (getCursor().getType() != c.getType()) setCursor(c);
+            }
+        };
+        addMouseListener(h);
+        addMouseMotionListener(h);
     }
 
     public void setBoard(Board b)                  { this.board = b; repaint(); }
@@ -106,11 +187,14 @@ public class BoardPanel extends JPanel {
             bb &= bb - 1L;
         }
 
-        // Pieces
+        // Pieces. While dragging, suppress the piece on the source square
+        // (we'll paint a floating copy at the cursor instead).
         for (int r = 0; r < 8; r++) {
             for (int c = 0; c < 8; c++) {
                 byte p = board.get(r, c);
                 if (p == Board.EMPTY) continue;
+                int thisSq = r * 8 + c;
+                if (dragging && thisSq == pressSq) continue;
                 int sx = x0 + c * cell;
                 int sy = y0 + (flipped ? r : (7 - r)) * cell;
                 int pad = Math.max(4, cell / 8);
@@ -141,6 +225,24 @@ public class BoardPanel extends JPanel {
             }
         }
 
+        // Floating drag piece. Drawn last so it appears on top of squares,
+        // overlays, and other pieces. Centered on the cursor.
+        if (dragging && pressSq >= 0) {
+            int r = pressSq >>> 3, c = pressSq & 7;
+            byte p = board.get(r, c);
+            if (p != Board.EMPTY) {
+                int pad = Math.max(4, cell / 8);
+                int d   = cell - 2 * pad;
+                int dx  = dragX - d / 2;
+                int dy  = dragY - d / 2;
+                g.setColor(p == Board.WHITE ? WHITE_PC : BLACK_PC);
+                g.fillOval(dx, dy, d, d);
+                g.setColor(PC_EDGE);
+                g.setStroke(new BasicStroke(Math.max(1f, cell / 28f)));
+                g.drawOval(dx, dy, d, d);
+            }
+        }
+
         g.dispose();
     }
 
@@ -154,7 +256,8 @@ public class BoardPanel extends JPanel {
 
     /* ----- click handling ----- */
 
-    private void onClick(int mx, int my) {
+    /** Convert mouse coordinates to a square index 0..63, or -1 if outside the board. */
+    private int squareAt(int mx, int my) {
         int w = getWidth(), h = getHeight();
         int side = Math.min(w, h);
         int margin = side / 16;
@@ -165,10 +268,10 @@ public class BoardPanel extends JPanel {
         int y0 = (h - boardSize) / 2;
 
         int cx = mx - x0, cy = my - y0;
-        if (cx < 0 || cy < 0 || cx >= boardSize || cy >= boardSize) return;
+        if (cx < 0 || cy < 0 || cx >= boardSize || cy >= boardSize) return -1;
         int col = cx / cell;
         int rowFromTop = cy / cell;
         int row = flipped ? rowFromTop : (7 - rowFromTop);
-        if (listener != null) listener.squareClicked(row, col);
+        return row * 8 + col;
     }
 }

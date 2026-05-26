@@ -27,12 +27,14 @@ import java.util.List;
  */
 public class Gui extends JFrame implements GameController.Listener {
 
-    private final BoardPanel     boardPanel  = new BoardPanel();
-    private final GameController controller  = new GameController();
-    private final JLabel         status      = new JLabel(" ");
+    private final BoardPanel        boardPanel  = new BoardPanel();
+    private final EngineOutputPanel outputPanel = new EngineOutputPanel();
+    private final GameController    controller  = new GameController();
+    private final JLabel            status      = new JLabel(" ");
+    private JSplitPane              split;
 
     /* Mode radio buttons live as fields so we can keep them in sync. */
-    private JRadioButtonMenuItem modeMP1, modeMP2, modeTwoMachines;
+    private JRadioButtonMenuItem modeMP1, modeMP2, modeTwoMachines, modeAnalyse;
 
     /* Last-used directories for the file choosers, remembered for the
      * lifetime of this window. Initialized lazily on first open/save so we
@@ -53,11 +55,16 @@ public class Gui extends JFrame implements GameController.Listener {
         status.setFont(status.getFont().deriveFont(Font.PLAIN, 13f));
 
         setLayout(new BorderLayout());
-        add(boardPanel, BorderLayout.CENTER);
+        // Board on the left, engine output panel on the right.
+        split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, boardPanel, outputPanel);
+        split.setResizeWeight(1.0);   // extra space goes to the board
+        split.setContinuousLayout(true);
+        split.setDividerSize(6);
+        add(split, BorderLayout.CENTER);
         add(status, BorderLayout.SOUTH);
 
         pack();
-        setMinimumSize(new Dimension(520, 600));
+        setMinimumSize(new Dimension(900, 620));
         setLocationRelativeTo(null);
 
         // Default: human plays White, engine plays Black.
@@ -73,7 +80,7 @@ public class Gui extends JFrame implements GameController.Listener {
 
         // File
         JMenu file = new JMenu("File");
-        file.add(action("New Game",        KeyEvent.VK_N, e -> controller.newGame()));
+        file.add(action("New Game",        KeyEvent.VK_N, e -> { outputPanel.note("New game"); controller.newGame(); }));
         file.add(action("Load Game...",    KeyEvent.VK_O, e -> loadGame()));
         file.add(action("Load Position...", 0,            e -> loadPosition()));
         file.addSeparator();
@@ -94,7 +101,14 @@ public class Gui extends JFrame implements GameController.Listener {
         JCheckBoxMenuItem flip = new JCheckBoxMenuItem("Flip View");
         flip.addActionListener(e -> boardPanel.setFlipped(flip.isSelected()));
         view.add(flip);
-        view.add(stub("Engine Output"));
+        JCheckBoxMenuItem coords = new JCheckBoxMenuItem("Coordinates", true);
+        coords.setToolTipText("Show a-h file letters and 1-8 rank numbers around the board");
+        coords.addActionListener(e -> boardPanel.setShowLabels(coords.isSelected()));
+        view.add(coords);
+        JCheckBoxMenuItem engOut = new JCheckBoxMenuItem("Engine Output", true);
+        engOut.setToolTipText("Show or hide the engine output panel on the right");
+        engOut.addActionListener(e -> setEngineOutputVisible(engOut.isSelected()));
+        view.add(engOut);
         view.add(stub("Evaluation Graph"));
         view.add(stub("Colors"));
         mb.add(view);
@@ -104,17 +118,26 @@ public class Gui extends JFrame implements GameController.Listener {
         ButtonGroup mg = new ButtonGroup();
         modeMP1 = radioMode("Machine Player 1",
                             "Engine plays White, human plays Black",
-                            () -> controller.setSides(GameController.Side.ENGINE, GameController.Side.HUMAN));
+                            () -> { outputPanel.note("Mode: Machine Player 1 (engine=W)");
+                                    controller.setMode(GameController.Mode.PLAY);
+                                    controller.setSides(GameController.Side.ENGINE, GameController.Side.HUMAN); });
         modeMP2 = radioMode("Machine Player 2",
                             "Human plays White, engine plays Black",
-                            () -> controller.setSides(GameController.Side.HUMAN, GameController.Side.ENGINE));
+                            () -> { outputPanel.note("Mode: Machine Player 2 (engine=B)");
+                                    controller.setMode(GameController.Mode.PLAY);
+                                    controller.setSides(GameController.Side.HUMAN, GameController.Side.ENGINE); });
         modeTwoMachines = radioMode("Two Machines",
                             "Engine vs engine",
-                            () -> controller.setSides(GameController.Side.ENGINE, GameController.Side.ENGINE));
-        mg.add(modeMP1); mg.add(modeMP2); mg.add(modeTwoMachines);
-        mode.add(modeMP1); mode.add(modeMP2); mode.add(modeTwoMachines);
+                            () -> { outputPanel.note("Mode: Two Machines");
+                                    controller.setMode(GameController.Mode.PLAY);
+                                    controller.setSides(GameController.Side.ENGINE, GameController.Side.ENGINE); });
+        modeAnalyse = radioMode("Analyse Mode",
+                            "Engine searches the current position continuously; click pieces to explore variations",
+                            () -> { outputPanel.note("Mode: Analyse");
+                                    controller.setMode(GameController.Mode.ANALYSE); });
+        mg.add(modeMP1); mg.add(modeMP2); mg.add(modeTwoMachines); mg.add(modeAnalyse);
+        mode.add(modeMP1); mode.add(modeMP2); mode.add(modeTwoMachines); mode.add(modeAnalyse);
         mode.addSeparator();
-        mode.add(stub("Analyse Mode"));
         mode.add(stub("Annotate Game"));
         mb.add(mode);
 
@@ -347,11 +370,32 @@ public class Gui extends JFrame implements GameController.Listener {
         }
     }
     @Override public void statusChanged(String text) { status.setText(text); }
-    @Override public void engineProgress(String line) { /* v1: nothing here yet */ }
+    @Override public void engineProgress(byte side, String line) {
+        outputPanel.append(side, line);
+    }
     @Override public void gameOver(String result) {
+        outputPanel.note("Game over: " + result);
         SwingUtilities.invokeLater(() ->
             JOptionPane.showMessageDialog(this, result, "Game over",
                                           JOptionPane.INFORMATION_MESSAGE));
+    }
+
+    /** Show or hide the right-side engine output panel.
+     *  We toggle by replacing the split-pane's right component with null so
+     *  the divider disappears and the board occupies the full window. */
+    private void setEngineOutputVisible(boolean show) {
+        if (show) {
+            if (split.getRightComponent() == outputPanel) return;
+            int dividerPos = split.getDividerLocation();
+            split.setRightComponent(outputPanel);
+            split.setDividerSize(6);
+            if (dividerPos > 0) split.setDividerLocation(dividerPos);
+        } else {
+            if (split.getRightComponent() == null) return;
+            split.setRightComponent(null);
+            split.setDividerSize(0);
+        }
+        revalidate();
     }
 
     /* ----- entry point ----- */

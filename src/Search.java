@@ -21,8 +21,10 @@ public final class Search {
         public final int  score;
         public final long nodes;
         public final int  depth;
-        public Result(Move m, int s, long n, int d) {
-            bestMove = m; score = s; nodes = n; depth = d;
+        public final long ms;
+        public Result(Move m, int s, long n, int d) { this(m, s, n, d, 0L); }
+        public Result(Move m, int s, long n, int d, long elapsedMs) {
+            bestMove = m; score = s; nodes = n; depth = d; ms = elapsedMs;
         }
     }
 
@@ -60,25 +62,89 @@ public final class Search {
     public TT        tt()        { return tt; }
     public Evaluator evaluator() { return eval; }
 
+    /**
+     * Called by an external thread to request prompt termination. The
+     * search checks this at iteration boundaries and at internal nodes;
+     * it returns the best result from the *last completed* iteration,
+     * never a partial one (which would have garbage at the abandoned
+     * subtrees).
+     *
+     * Stored as a final reference so the JIT can hoist the read.
+     */
+    public interface CancelFlag { boolean isCancelled(); }
+    private static final CancelFlag NEVER_CANCEL = () -> false;
+
+    /** Per-iteration progress callback. Invoked on the search thread between
+     *  iterations, never inside one. Receives the result of the iteration
+     *  that just completed. */
+    public interface IterationCallback { void onIteration(Result r); }
+    private static final IterationCallback NO_CALLBACK = r -> {};
+
+    /** Sentinel thrown from negamax when the cancel flag is set; caught in
+     *  findBest to discard the partial iteration. Not a "real" error. */
+    @SuppressWarnings("serial")
+    private static final class CancelledException extends RuntimeException {
+        CancelledException() { super(null, null, false, false); }
+    }
+    private static final CancelledException CANCEL_SENTINEL = new CancelledException();
+
+    private CancelFlag        cancel    = NEVER_CANCEL;
+    private IterationCallback callback  = NO_CALLBACK;
+    /** Cancel-check throttle: only consult the flag every Nth node. */
+    private static final int CANCEL_CHECK_MASK = 0xFFF;
+
     public Result findBest(Board b, int maxDepth) {
+        return findBest(b, maxDepth, NEVER_CANCEL, NO_CALLBACK);
+    }
+
+    /**
+     * Run iterative-deepening search. Returns the result of the deepest
+     * completed iteration (never a partial one). If `cancel` becomes true
+     * during a search iteration, that iteration is discarded and we return
+     * whatever the previous iteration found.
+     */
+    public Result findBest(Board b, int maxDepth, CancelFlag cancel, IterationCallback cb) {
         clearKillers();
+        this.cancel   = (cancel == null)   ? NEVER_CANCEL : cancel;
+        this.callback = (cb == null)       ? NO_CALLBACK  : cb;
+
         int  bestMovePacked = Move.NONE;
         int  bestScore      = 0;
         long bestNodes      = 0;
         int  bestDepth      = 0;
+        long totalNodes     = 0;
+        long t0             = System.currentTimeMillis();
         for (int d = 1; d <= maxDepth; d++) {
+            if (this.cancel.isCancelled()) break;
             nodes = 0;
-            int score = negamax(b, d, 0, -Evaluator.MAX_SCORE, Evaluator.MAX_SCORE);
+            int score;
+            try {
+                score = negamax(b, d, 0, -Evaluator.MAX_SCORE, Evaluator.MAX_SCORE);
+            } catch (CancelledException ce) {
+                // Mid-iteration cancellation: discard this iteration entirely.
+                // The TT has incomplete entries from this iteration which would
+                // poison future searches, so we wipe it on cancel.
+                tt.clear();
+                break;
+            }
+            totalNodes += nodes;
             bestScore = score;
-            bestNodes = nodes;
+            bestNodes = totalNodes;
             bestDepth = d;
-            // Best move at root: pull from the TT (we just stored it).
             TT.Entry rootE = tt.probe(b.hash());
             if (rootE != null) bestMovePacked = rootE.bestMove;
+            // Report this iteration's result.
+            Move iterMove = bestMovePacked == Move.NONE ? null : Move.unpack(bestMovePacked);
+            long elapsed  = System.currentTimeMillis() - t0;
+            this.callback.onIteration(new Result(iterMove, score, totalNodes, d, elapsed));
             if (Math.abs(score) >= MATE_THRESHOLD) break;
         }
+        // Reset for safety in case the Search instance is reused.
+        this.cancel   = NEVER_CANCEL;
+        this.callback = NO_CALLBACK;
         Move bm = bestMovePacked == Move.NONE ? null : Move.unpack(bestMovePacked);
-        return new Result(bm, bestScore, bestNodes, bestDepth);
+        return new Result(bm, bestScore, bestNodes, bestDepth,
+                          System.currentTimeMillis() - t0);
     }
 
     private void clearKillers() {
@@ -103,6 +169,10 @@ public final class Search {
      */
     private int negamax(Board b, int depth, int ply, int alpha, int beta) {
         nodes++;
+        // Cancellation check, throttled so we don't read the flag every node.
+        if ((nodes & CANCEL_CHECK_MASK) == 0 && cancel.isCancelled()) {
+            throw CANCEL_SENTINEL;
+        }
         final int  alphaOrig = alpha;
         final long hash      = b.hash();
 
@@ -153,9 +223,25 @@ public final class Search {
             scores[i] = orderScore(b, side, moves[i], ttMove, killer0, killer1);
         }
 
-        /* ----- Search children ----- */
+        /* ----- Search children with PVS -----
+         *
+         * Principal Variation Search: the first move (highest-ordered) gets
+         * a full-window search. Every subsequent move gets a zero-window
+         * "scout" search asking only "is this better than alpha?". If the
+         * answer is yes (the scout returns > alpha), we re-search with the
+         * full window to get the actual score. If no, we keep moving.
+         *
+         * Zero-window searches prune very aggressively, so when ordering is
+         * good (which it usually is — TT move, captures, killers come first)
+         * the scout-then-skip case dominates and the search is faster overall.
+         *
+         * Re-searches are skipped at depth 1 because there's no proper
+         * recursion below them; the zero-window value is already final
+         * (it's just a quiescence score with a beta cutoff at alpha+1).
+         */
         int bestMove  = moves[0];
         int bestScore = -Evaluator.MAX_SCORE;
+        boolean searchedPV = false;
         for (int i = 0; i < n; i++) {
             // Find the highest-scoring remaining move; swap it to position i.
             int maxIdx = i;
@@ -170,7 +256,22 @@ public final class Search {
 
             int m   = moves[i];
             byte cap = b.applyPacked(m);
-            int s = -negamax(b, depth - 1, ply + 1, -beta, -alpha);
+
+            int s;
+            if (!searchedPV) {
+                // First move: full window.
+                s = -negamax(b, depth - 1, ply + 1, -beta, -alpha);
+                searchedPV = true;
+            } else {
+                // Scout search with a null (zero-width) window.
+                s = -negamax(b, depth - 1, ply + 1, -alpha - 1, -alpha);
+                if (s > alpha && s < beta && depth > 1) {
+                    // Scout failed high but didn't already cause a beta cutoff:
+                    // re-search with the full window to get the exact value.
+                    s = -negamax(b, depth - 1, ply + 1, -beta, -alpha);
+                }
+            }
+
             b.undoPacked(m, cap);
 
             if (s > bestScore) { bestScore = s; bestMove = m; }

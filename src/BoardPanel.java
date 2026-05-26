@@ -30,7 +30,7 @@ public class BoardPanel extends JPanel {
     private static final Color  WHITE_PC  = new Color(0xF5F5F5);
     private static final Color  BLACK_PC  = new Color(0x2E2E2E);
     private static final Color  PC_EDGE   = new Color(0x202020);
-    private static final Color  LABEL     = new Color(0x303030);
+    private static final Color  LABEL     = new Color(0xC8C8C8);
 
     /* ----- model snapshot ----- */
     private Board       board       = Board.initial();
@@ -39,6 +39,7 @@ public class BoardPanel extends JPanel {
     private int         lastFromSq  = -1;
     private int         lastToSq    = -1;
     private boolean     flipped     = false;
+    private boolean     showLabels  = true;
 
     private SquareClickListener listener;
 
@@ -56,6 +57,8 @@ public class BoardPanel extends JPanel {
     public void setHighlights(long bb)             { this.highlights = bb; repaint(); }
     public void setLastMove(int fromSq, int toSq)  { this.lastFromSq = fromSq; this.lastToSq = toSq; repaint(); }
     public void clearLastMove()                    { this.lastFromSq = -1; this.lastToSq = -1; repaint(); }
+    public void setShowLabels(boolean s)           { this.showLabels = s; repaint(); }
+    public boolean isShowingLabels()               { return showLabels; }
     public void setFlipped(boolean f)              { this.flipped = f; repaint(); }
     public boolean isFlipped()                     { return flipped; }
     public void setClickListener(SquareClickListener l) { this.listener = l; }
@@ -120,19 +123,22 @@ public class BoardPanel extends JPanel {
             }
         }
 
-        // File/rank labels
-        g.setColor(LABEL);
-        g.setFont(getFont().deriveFont(Font.PLAIN, Math.max(10f, cell / 5f)));
-        FontMetrics fm = g.getFontMetrics();
-        for (int c = 0; c < 8; c++) {
-            String s = String.valueOf((char) ('a' + c));
-            int sx = x0 + c * cell + (cell - fm.stringWidth(s)) / 2;
-            g.drawString(s, sx, y0 + boardSize + fm.getAscent() + 2);
-        }
-        for (int r = 0; r < 8; r++) {
-            String s = String.valueOf(r + 1);
-            int sy = y0 + (flipped ? r : (7 - r)) * cell + (cell + fm.getAscent()) / 2 - 2;
-            g.drawString(s, x0 - fm.stringWidth(s) - 4, sy);
+        // File/rank labels — drawn in the margin around the board.
+        // The margin is always present so toggling labels doesn't resize the board.
+        if (showLabels) {
+            g.setColor(LABEL);
+            g.setFont(getFont().deriveFont(Font.PLAIN, Math.max(10f, cell / 5f)));
+            FontMetrics fm = g.getFontMetrics();
+            for (int c = 0; c < 8; c++) {
+                String s = String.valueOf((char) ('a' + c));
+                int sx = x0 + c * cell + (cell - fm.stringWidth(s)) / 2;
+                g.drawString(s, sx, y0 + boardSize + fm.getAscent() + 2);
+            }
+            for (int r = 0; r < 8; r++) {
+                String s = String.valueOf(r + 1);
+                int sy = y0 + (flipped ? r : (7 - r)) * cell + (cell + fm.getAscent()) / 2 - 2;
+                g.drawString(s, x0 - fm.stringWidth(s) - 4, sy);
+            }
         }
 
         g.dispose();

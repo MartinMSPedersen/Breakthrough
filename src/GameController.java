@@ -20,14 +20,18 @@ public class GameController {
 
     /** Who controls each side. */
     public enum Side  { HUMAN, ENGINE }
+    /** PLAY = normal game (sides drive moves). ANALYSE = engine searches the
+     *  current position continuously; the user can move pieces for either
+     *  side to explore variations. */
+    public enum Mode  { PLAY, ANALYSE }
 
     public interface Listener {
         /** Board state changed (move applied/undone, new game, etc). */
         void boardChanged(Board newBoard, int lastFromSq, int lastToSq);
         /** Status line should update (e.g. "White to move", "engine thinking...", "game over"). */
         void statusChanged(String text);
-        /** Engine progress: best move, score, depth, nodes, ms. */
-        void engineProgress(String line);
+        /** Engine progress: which side (Board.WHITE/BLACK) and a free-form line. */
+        void engineProgress(byte side, String line);
         /** Game ended; result describes who won and how. */
         void gameOver(String result);
     }
@@ -39,10 +43,18 @@ public class GameController {
 
     private Side whiteSide = Side.HUMAN;
     private Side blackSide = Side.ENGINE;
+    private Mode mode      = Mode.PLAY;
     /** Per-side engine settings (depth, TT, weights, defender scale).
      *  Whichever side the engine controls reads its settings here. */
     private EngineSettings whiteSettings = EngineSettings.defaults();
     private EngineSettings blackSettings = EngineSettings.defaults();
+    /** Maximum depth used by Analyse Mode. Capped to prevent runaway memory. */
+    private int analyseMaxDepth = 14;
+    /** Cancel flag for the currently running Analyse search, if any. The
+     *  controller sets this true to stop the running analysis, then clears
+     *  it (allocates a fresh AtomicBoolean) before starting a new one. */
+    private java.util.concurrent.atomic.AtomicBoolean analyseCancel
+        = new java.util.concurrent.atomic.AtomicBoolean();
 
     /** True between SwingWorker.start and done. EDT-only. */
     private boolean thinkingNow = false;
@@ -75,6 +87,7 @@ public class GameController {
     /* ----- public API used by Gui ----- */
 
     public void newGame() {
+        stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
         board = Board.initial();
@@ -84,7 +97,8 @@ public class GameController {
         
         fireBoardChanged();
         updateStatus();
-        maybeKickEngine();
+        if (mode == Mode.ANALYSE) startAnalyse();
+        else                       maybeKickEngine();
     }
 
     /**
@@ -93,6 +107,7 @@ public class GameController {
      * IllegalArgumentException if any move in the list is illegal at its turn.
      */
     public void loadGame(java.util.List<Move> moves) {
+        stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
         Board b = Board.initial();
@@ -134,7 +149,8 @@ public class GameController {
             fireGameOver((w == Board.WHITE ? "White" : "Black") + " wins on move "
                        + ((playedMoves.size() + 1) / 2));
         } else {
-            maybeKickEngine();
+            if (mode == Mode.ANALYSE) startAnalyse();
+            else                       maybeKickEngine();
         }
     }
 
@@ -143,6 +159,7 @@ public class GameController {
      * is cleared (we don't know what moves led to this position).
      */
     public void loadPosition(Board newBoard) {
+        stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
         board = newBoard;
@@ -156,22 +173,44 @@ public class GameController {
         if (w != Board.EMPTY) {
             fireGameOver((w == Board.WHITE ? "White" : "Black") + " wins");
         } else {
-            maybeKickEngine();
+            if (mode == Mode.ANALYSE) startAnalyse();
+            else                       maybeKickEngine();
         }
     }
 
     public void setSides(Side white, Side black) {
+        stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
         whiteSide = white;
         blackSide = black;
         
         updateStatus();
-        maybeKickEngine();
+        if (mode == Mode.ANALYSE) startAnalyse();
+        else                       maybeKickEngine();
     }
 
     public Side whiteSide() { return whiteSide; }
     public Side blackSide() { return blackSide; }
+    public Mode mode()      { return mode; }
+
+    /** Switch into Analyse Mode: stop any thinking, start a continuous search
+     *  on the current position. The user can still click pieces to move
+     *  (for either side). Switching out of Analyse cancels the search. */
+    public void setMode(Mode newMode) {
+        if (mode == newMode) return;
+        mode = newMode;
+        stopAnalyse();              // always cancel any running analysis first
+        currentGeneration++;        // invalidates any normal-play workers in flight
+        thinkingNow = false;
+        if (mode == Mode.ANALYSE) {
+            startAnalyse();
+        } else {
+            // Returning to PLAY mode: pick up where we are.
+            maybeKickEngine();
+        }
+        updateStatus();
+    }
 
     public EngineSettings whiteSettings() { return whiteSettings; }
     public EngineSettings blackSettings() { return blackSettings; }
@@ -199,7 +238,9 @@ public class GameController {
     public void onClick(int row, int col) {
         if (thinkingNow) return;                       // ignore clicks while engine thinks
         if (board.winner() != Board.EMPTY) return;     // game over
-        if (sideToMoveIsEngine()) return;              // not the human's turn
+        // In PLAY mode: only the human side may move. In ANALYSE mode: any
+        // human can move for any side (you're exploring lines).
+        if (mode == Mode.PLAY && sideToMoveIsEngine()) return;
 
         int clickedSq = row * 8 + col;
         byte stm = board.side();
@@ -281,7 +322,13 @@ public class GameController {
             return;
         }
         updateStatus();
-        maybeKickEngine();
+        if (mode == Mode.ANALYSE) {
+            stopAnalyse();
+            currentGeneration++;   // invalidate any in-flight analyse callbacks
+            startAnalyse();
+        } else {
+            maybeKickEngine();
+        }
     }
 
     private boolean sideToMoveIsEngine() {
@@ -295,6 +342,7 @@ public class GameController {
      * launch a background search. Must be called on the EDT.
      */
     private void maybeKickEngine() {
+        if (mode == Mode.ANALYSE) return;        // analyse uses startAnalyse instead
         if (!sideToMoveIsEngine()) return;
         if (thinkingNow) return;
         if (board.winner() != Board.EMPTY) return;
@@ -302,7 +350,8 @@ public class GameController {
         // Capture the current state for the worker — clone via FEN so the
         // worker's mutations don't alias the EDT-owned board.
         final String fen = board.toFen();
-        final EngineSettings cfg = (board.side() == Board.WHITE) ? whiteSettings : blackSettings;
+        final byte   searchSide = board.side();
+        final EngineSettings cfg = (searchSide == Board.WHITE) ? whiteSettings : blackSettings;
         final long generation = currentGeneration;
         thinkingNow = true;
         updateStatus();
@@ -319,11 +368,8 @@ public class GameController {
                 return r.bestMove;
             }
             @Override protected void process(List<String> lines) {
-                // Suppress progress lines from stale workers — they'd corrupt
-                // the engine-output panel by reporting about a now-defunct
-                // position.
                 if (generation != currentGeneration) return;
-                if (listener != null) for (String l : lines) listener.engineProgress(l);
+                if (listener != null) for (String l : lines) listener.engineProgress(searchSide, l);
             }
             @Override protected void done() {
                 thinkingNow = false;
@@ -337,6 +383,51 @@ public class GameController {
             }
         };
         worker.execute();
+    }
+
+    /* ----- analyse mode ----- */
+
+    /**
+     * Start a continuous iterative-deepening search on the current position.
+     * Runs on a daemon thread. Iteration callbacks are re-posted to the EDT
+     * so the listener's `engineProgress` always runs on the EDT.
+     *
+     * Uses the side-to-move's engine settings (weights/TT) but pushes depth
+     * to `analyseMaxDepth` regardless of the settings' depth — Analyse Mode
+     * is "search as deep as you can in a reasonable time".
+     */
+    private void startAnalyse() {
+        if (board.winner() != Board.EMPTY) return;
+        byte stm = board.side();
+        final String fen = board.toFen();
+        final EngineSettings cfg = (stm == Board.WHITE) ? whiteSettings : blackSettings;
+        final int  maxDepth = analyseMaxDepth;
+        final long generation = currentGeneration;
+        final byte searchSide = stm;
+        // Fresh cancel flag for this analyse run.
+        analyseCancel = new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean myCancel = analyseCancel;
+
+        Thread t = new Thread(() -> {
+            Board copy = Board.fromFen(fen);
+            Search s = cfg.buildSearch();
+            s.findBest(copy, maxDepth, myCancel::get, res -> {
+                if (generation != currentGeneration) return;
+                String line = String.format(
+                    "(analyse) depth=%d  best=%s  score=%+d  nodes=%d  %d ms",
+                    res.depth, res.bestMove, res.score, res.nodes, res.ms);
+                SwingUtilities.invokeLater(() -> {
+                    if (generation != currentGeneration) return;
+                    if (listener != null) listener.engineProgress(searchSide, line);
+                });
+            });
+        }, "BreakthroughAnalyse");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void stopAnalyse() {
+        if (analyseCancel != null) analyseCancel.set(true);
     }
 
     /* ----- listener helpers ----- */
@@ -354,7 +445,11 @@ public class GameController {
             listener.statusChanged((w == Board.WHITE ? "White" : "Black") + " wins.");
             return;
         }
-        String stm   = (board.side() == Board.WHITE) ? "White" : "Black";
+        String stm = (board.side() == Board.WHITE) ? "White" : "Black";
+        if (mode == Mode.ANALYSE) {
+            listener.statusChanged("Analysing — " + stm + " to move. Click any piece to explore.");
+            return;
+        }
         String controller = (sideToMoveIsEngine() ? "engine" : "human");
         if (thinkingNow) {
             int d = (board.side() == Board.WHITE) ? whiteSettings.depth : blackSettings.depth;

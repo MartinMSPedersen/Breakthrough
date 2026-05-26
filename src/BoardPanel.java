@@ -199,7 +199,7 @@ public class BoardPanel extends JPanel {
                 int d = cell - 2 * pad;
                 g.setColor(p == Board.WHITE ? theme.whitePc : theme.blackPc);
                 g.fillOval(sx + pad, sy + pad, d, d);
-                g.setColor(theme.pcEdge);
+                g.setColor(p == Board.WHITE ? theme.whiteEdge : theme.blackEdge);
                 g.setStroke(new BasicStroke(Math.max(1f, cell / 28f)));
                 g.drawOval(sx + pad, sy + pad, d, d);
             }
@@ -209,7 +209,7 @@ public class BoardPanel extends JPanel {
         // The margin is always present so toggling labels doesn't resize the board.
         if (showLabels) {
             g.setColor(theme.label);
-            g.setFont(getFont().deriveFont(Font.PLAIN, Math.max(10f, cell / 5f)));
+            g.setFont(getFont().deriveFont(Font.BOLD, Math.max(14f, cell / 3.5f)));
             FontMetrics fm = g.getFontMetrics();
             for (int c = 0; c < 8; c++) {
                 String s = String.valueOf((char) ('a' + c));
@@ -235,7 +235,7 @@ public class BoardPanel extends JPanel {
                 int dy  = dragY - d / 2;
                 g.setColor(p == Board.WHITE ? theme.whitePc : theme.blackPc);
                 g.fillOval(dx, dy, d, d);
-                g.setColor(theme.pcEdge);
+                g.setColor(p == Board.WHITE ? theme.whiteEdge : theme.blackEdge);
                 g.setStroke(new BasicStroke(Math.max(1f, cell / 28f)));
                 g.drawOval(dx, dy, d, d);
             }

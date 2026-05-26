@@ -22,32 +22,47 @@ public final class Theme {
     public final Color lastMv;        // last-move overlay (semi-opaque)
     public final Color whitePc;
     public final Color blackPc;
-    public final Color pcEdge;
+    public final Color whiteEdge;     // outline around white pieces
+    public final Color blackEdge;     // outline around black pieces
     public final Color label;         // coordinate text
 
     /* engine output panel */
     public final Color outputBg;
     public final Color outputFg;
 
+    /** Both edges the same color (most themes). */
     public Theme(String name,
                  Color panelBg, Color lightSq, Color darkSq,
                  Color selSq, Color hlDest, Color lastMv,
                  Color whitePc, Color blackPc, Color pcEdge,
                  Color label,
                  Color outputBg, Color outputFg) {
-        this.name     = name;
-        this.panelBg  = panelBg;
-        this.lightSq  = lightSq;
-        this.darkSq   = darkSq;
-        this.selSq    = selSq;
-        this.hlDest   = hlDest;
-        this.lastMv   = lastMv;
-        this.whitePc  = whitePc;
-        this.blackPc  = blackPc;
-        this.pcEdge   = pcEdge;
-        this.label    = label;
-        this.outputBg = outputBg;
-        this.outputFg = outputFg;
+        this(name, panelBg, lightSq, darkSq, selSq, hlDest, lastMv,
+             whitePc, blackPc, pcEdge, pcEdge, label, outputBg, outputFg);
+    }
+
+    /** Per-piece edge colors (for themes where they need to differ, like High Contrast). */
+    public Theme(String name,
+                 Color panelBg, Color lightSq, Color darkSq,
+                 Color selSq, Color hlDest, Color lastMv,
+                 Color whitePc, Color blackPc,
+                 Color whiteEdge, Color blackEdge,
+                 Color label,
+                 Color outputBg, Color outputFg) {
+        this.name      = name;
+        this.panelBg   = panelBg;
+        this.lightSq   = lightSq;
+        this.darkSq    = darkSq;
+        this.selSq     = selSq;
+        this.hlDest    = hlDest;
+        this.lastMv    = lastMv;
+        this.whitePc   = whitePc;
+        this.blackPc   = blackPc;
+        this.whiteEdge = whiteEdge;
+        this.blackEdge = blackEdge;
+        this.label     = label;
+        this.outputBg  = outputBg;
+        this.outputFg  = outputFg;
     }
 
     /** The default colors — matches what the GUI looked like before themes existed. */
@@ -84,7 +99,9 @@ public final class Theme {
         new Color(0xCB, 0xD5, 0xE1)
     );
 
-    /** Accessibility-oriented: maximum contrast, no anti-aliasing tricks. */
+    /** Accessibility-oriented: maximum contrast. White pieces get a dark
+     *  outline so they're visible on light squares; black pieces get a light
+     *  outline so they're visible on dark squares. Highlights stay bright. */
     public static final Theme HIGH_CONTRAST = new Theme(
         "High Contrast",
         new Color(0x00, 0x00, 0x00),
@@ -93,12 +110,13 @@ public final class Theme {
         new Color(0x00, 0x80, 0xFF, 0xE0),// selSq
         new Color(0x00, 0xFF, 0x00, 0xC0),// hlDest
         new Color(0xFF, 0xFF, 0x00, 0xC0),// lastMv
-        new Color(0xFF, 0xFF, 0xFF),
-        new Color(0x00, 0x00, 0x00),
-        new Color(0xFF, 0xFF, 0xFF),      // pcEdge: white edge so black on dark sq is visible
-        new Color(0xFF, 0xFF, 0xFF),
-        new Color(0x00, 0x00, 0x00),
-        new Color(0xFF, 0xFF, 0xFF)
+        new Color(0xFF, 0xFF, 0xFF),      // whitePc
+        new Color(0x00, 0x00, 0x00),      // blackPc
+        new Color(0x00, 0x00, 0x00),      // whiteEdge: black outline on white pieces
+        new Color(0xFF, 0xFF, 0xFF),      // blackEdge: white outline on black pieces
+        new Color(0xFF, 0xFF, 0xFF),      // label
+        new Color(0x00, 0x00, 0x00),      // outputBg
+        new Color(0xFF, 0xFF, 0xFF)       // outputFg
     );
 
     /** Warm, low-glare; easy on the eyes for long sessions. */

@@ -153,6 +153,7 @@ public class Gui extends JFrame implements GameController.Listener {
 
         // Help
         JMenu help = new JMenu("Help");
+        help.add(action("Rules", 0, e -> openRules()));
         help.add(action("About", 0, e -> showAbout()));
         mb.add(help);
 
@@ -210,6 +211,28 @@ public class Gui extends JFrame implements GameController.Listener {
             "Breakthrough GUI\n\nFront-end for the Breakthrough engine.\n"
           + "Click a piece to select it, then click a destination to move.",
             "About Breakthrough", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    /** Open the Breakthrough rules (Wikipedia) in the user's default browser. */
+    private void openRules() {
+        final String url = "https://en.wikipedia.org/wiki/Breakthrough_(board_game)";
+        try {
+            if (java.awt.Desktop.isDesktopSupported()) {
+                java.awt.Desktop d = java.awt.Desktop.getDesktop();
+                if (d.isSupported(java.awt.Desktop.Action.BROWSE)) {
+                    d.browse(new java.net.URI(url));
+                    return;
+                }
+            }
+            // Fallback: try xdg-open. Useful on minimal Linux setups where
+            // Desktop.BROWSE isn't supported but xdg-open is available.
+            new ProcessBuilder("xdg-open", url).inheritIO().start();
+        } catch (Exception ex) {
+            // Last resort: show the URL so the user can copy it manually.
+            JOptionPane.showMessageDialog(this,
+                "Could not open the browser automatically.\nURL:\n" + url,
+                "Rules", JOptionPane.INFORMATION_MESSAGE);
+        }
     }
 
     /* ----- Engine: Settings ----- */

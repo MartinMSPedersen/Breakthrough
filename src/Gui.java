@@ -418,14 +418,13 @@ public class Gui extends JFrame implements GameController.Listener {
         }
     }
 
-    /** Render the app icon at several sizes by drawing a small board snapshot.
-     *  Java/the desktop will pick the appropriate size for window title bar,
+    /** Render the app icon at several sizes by drawing the starting position.
+     *  Java/the desktop picks the appropriate size for window title bar,
      *  taskbar, alt-tab, etc. We only render sizes large enough for pieces
      *  to actually be visible; the OS bilinearly downscales for small
      *  contexts (16x16 etc.). */
     private static java.util.List<java.awt.image.BufferedImage> buildAppIcons() {
-        // Mid-game-ish position so the icon isn't just a checkerboard with two solid rows.
-        Board b = Board.fromFen("OOOOOOOO/O1O1OOOO/2O5/4X3/2O1X3/8/XXX1XXXX/XXXXXXXX W");
+        Board b = Board.initial();
         int[] sizes = { 64, 128, 256 };
         java.util.List<java.awt.image.BufferedImage> icons = new java.util.ArrayList<>();
         for (int s : sizes) {
@@ -433,7 +432,6 @@ public class Gui extends JFrame implements GameController.Listener {
             p.setSize(s, s);
             p.setBoard(b);
             p.setShowLabels(false);
-            p.setLastMove(3 * 8 + 4, 4 * 8 + 4);  // e4 → e5, splash of yellow
             java.awt.image.BufferedImage img =
                 new java.awt.image.BufferedImage(s, s, java.awt.image.BufferedImage.TYPE_INT_ARGB);
             Graphics2D g = img.createGraphics();
@@ -822,6 +820,19 @@ public class Gui extends JFrame implements GameController.Listener {
 
     /* ----- entry point ----- */
     public static void main(String[] args) {
+        // Linux/X11 uses the AWT toolkit's "awtAppClassName" as WM_CLASS,
+        // which is what the desktop shows under the icon in the taskbar
+        // and alt-tab list. Without this, it defaults to "Gui" (the main
+        // class's simple name). MUST be set before any AWT class loads.
+        System.setProperty("awt.useSystemAAFontSettings", "on");
+        try {
+            java.awt.Toolkit tk = java.awt.Toolkit.getDefaultToolkit();
+            java.lang.reflect.Field f = tk.getClass().getDeclaredField("awtAppClassName");
+            f.setAccessible(true);
+            f.set(tk, "Breakthrough");
+        } catch (Exception ignore) {
+            // Non-X11 toolkit (Windows/macOS) — irrelevant, they use the JFrame title.
+        }
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (Exception ignore) {}

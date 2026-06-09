@@ -18,12 +18,7 @@ public class IconGen {
         int size = 256;
         BoardPanel p = new BoardPanel();
         p.setSize(size, size);
-        // Set up a recognizable mid-game-ish position so the icon isn't just
-        // a checkerboard with two solid rows.
-        Board b = Board.fromFen("OOOOOOOO/O1O1OOOO/2O5/4X3/2O1X3/8/XXX1XXXX/XXXXXXXX W");
-        p.setBoard(b);
-        // Show a last-move highlight to give the icon a splash of color.
-        p.setLastMove(3 * 8 + 4, 4 * 8 + 4);  // e4 -> e5
+        p.setBoard(Board.initial());
         p.setShowLabels(false);
 
         BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);

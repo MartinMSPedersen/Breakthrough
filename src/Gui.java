@@ -34,7 +34,13 @@ public class Gui extends JFrame implements GameController.Listener {
     private JSplitPane              split;
 
     /* Mode radio buttons live as fields so we can keep them in sync. */
-    private JRadioButtonMenuItem modeMP1, modeMP2, modeTwoMachines, modeAnalyse;
+    private JRadioButtonMenuItem modeMP1, modeMP2, modeTwoMachines, modeAnalyse, modeAnnotate;
+
+    /* Annotate toolbar — south of the board, only visible in Annotate mode. */
+    private JPanel  annotateBar;
+    private JButton btnStart, btnPrev, btnNext, btnEnd;
+    private JLabel  annotateLabel;
+    private JPanel  southStack;   // holds annotateBar above the status line
 
     /* Last-used directories for the file choosers, remembered for the
      * lifetime of this window. Initialized lazily on first open/save so we
@@ -61,7 +67,14 @@ public class Gui extends JFrame implements GameController.Listener {
         split.setContinuousLayout(true);
         split.setDividerSize(6);
         add(split, BorderLayout.CENTER);
-        add(status, BorderLayout.SOUTH);
+
+        // Annotate toolbar: hidden by default, shown only in Annotate mode.
+        annotateBar = buildAnnotateBar();
+        annotateBar.setVisible(false);
+        southStack = new JPanel(new BorderLayout());
+        southStack.add(annotateBar, BorderLayout.NORTH);
+        southStack.add(status,      BorderLayout.SOUTH);
+        add(southStack, BorderLayout.SOUTH);
 
         pack();
         setMinimumSize(new Dimension(900, 620));
@@ -71,6 +84,8 @@ public class Gui extends JFrame implements GameController.Listener {
         controller.setSides(GameController.Side.HUMAN, GameController.Side.ENGINE);
         modeMP2.setSelected(true);
         controller.newGame();
+
+        installAnnotateKeys();
     }
 
     /* ----- menu construction ----- */
@@ -135,10 +150,11 @@ public class Gui extends JFrame implements GameController.Listener {
                             "Engine searches the current position continuously; click pieces to explore variations",
                             () -> { outputPanel.note("Mode: Analyse");
                                     controller.setMode(GameController.Mode.ANALYSE); });
-        mg.add(modeMP1); mg.add(modeMP2); mg.add(modeTwoMachines); mg.add(modeAnalyse);
-        mode.add(modeMP1); mode.add(modeMP2); mode.add(modeTwoMachines); mode.add(modeAnalyse);
-        mode.addSeparator();
-        mode.add(stub("Annotate Game"));
+        modeAnnotate = radioMode("Annotate Game",
+                            "Load a saved game and walk through it ply by ply with engine analysis",
+                            this::enterAnnotateMode);
+        mg.add(modeMP1); mg.add(modeMP2); mg.add(modeTwoMachines); mg.add(modeAnalyse); mg.add(modeAnnotate);
+        mode.add(modeMP1); mode.add(modeMP2); mode.add(modeTwoMachines); mode.add(modeAnalyse); mode.add(modeAnnotate);
         mb.add(mode);
 
         // Engine
@@ -423,6 +439,32 @@ public class Gui extends JFrame implements GameController.Listener {
             JOptionPane.showMessageDialog(this, result, "Game over",
                                           JOptionPane.INFORMATION_MESSAGE));
     }
+    @Override public void annotateStateChanged(int ply, int totalPlies) {
+        boolean active = (controller.mode() == GameController.Mode.ANNOTATE);
+        annotateBar.setVisible(active);
+        if (active) {
+            // Move number = ceil(ply / 2); side is determined by ply parity.
+            int moveNum = (ply + 1) / 2;
+            String label;
+            if (ply == 0)                       label = "before move 1";
+            else if (ply >= totalPlies)         label = "end of game";
+            else if ((ply & 1) == 1)            label = "after " + moveNum + ". White";
+            else                                label = "after " + moveNum + "... Black";
+            annotateLabel.setText("ply " + ply + " / " + totalPlies + "   (" + label + ")");
+            btnStart.setEnabled(ply > 0);
+            btnPrev .setEnabled(ply > 0);
+            btnNext .setEnabled(ply < totalPlies);
+            btnEnd  .setEnabled(ply < totalPlies);
+        }
+        // revalidate so the toolbar appearing/disappearing is reflected.
+        southStack.revalidate();
+    }
+    @Override public void annotateResult(int ply, Move played, Search.Result r, boolean agrees) {
+        String tag = agrees ? "engine agrees" : ("engine prefers " + r.bestMove);
+        String line = String.format("Ply %d: played %s — depth %d score %+d  (%s)",
+                                    ply, played, r.depth, r.score, tag);
+        outputPanel.note(line);
+    }
 
     /** Show or hide the right-side engine output panel.
      *  We toggle by replacing the split-pane's right component with null so
@@ -440,6 +482,104 @@ public class Gui extends JFrame implements GameController.Listener {
             split.setDividerSize(0);
         }
         revalidate();
+    }
+
+    /* ----- Annotate Mode ----- */
+
+    /** Build the annotate toolbar widget. Buttons fire controller methods;
+     *  the label is updated by annotateStateChanged(). */
+    private JPanel buildAnnotateBar() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 4));
+        bar.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(0xA0, 0xA0, 0xA0)));
+        btnStart = new JButton("|<");  btnStart.setToolTipText("Go to start (Home)");
+        btnPrev  = new JButton("<");   btnPrev.setToolTipText("Previous ply (\u2190)");
+        btnNext  = new JButton(">");   btnNext.setToolTipText("Next ply (\u2192)");
+        btnEnd   = new JButton(">|");  btnEnd.setToolTipText("Go to end (End)");
+        annotateLabel = new JLabel(" ");
+        annotateLabel.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
+
+        btnStart.addActionListener(e -> controller.annotateGoto(0));
+        btnPrev .addActionListener(e -> controller.annotateStep(-1));
+        btnNext .addActionListener(e -> controller.annotateStep(+1));
+        btnEnd  .addActionListener(e -> controller.annotateGoto(controller.annotateTotal()));
+
+        bar.add(btnStart);
+        bar.add(btnPrev);
+        bar.add(annotateLabel);
+        bar.add(btnNext);
+        bar.add(btnEnd);
+        return bar;
+    }
+
+    /** Install keyboard shortcuts for stepping. Wired into the frame's root
+     *  pane so they fire regardless of which child has focus, but only when
+     *  we're in Annotate Mode. */
+    private void installAnnotateKeys() {
+        JRootPane rp = getRootPane();
+        InputMap  im = rp.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
+        ActionMap am = rp.getActionMap();
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_LEFT,  0), "ann-prev");
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0), "ann-next");
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_HOME,  0), "ann-start");
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_END,   0), "ann-end");
+        am.put("ann-prev",  new AbstractAction() { public void actionPerformed(ActionEvent e) {
+            if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateStep(-1);
+        }});
+        am.put("ann-next",  new AbstractAction() { public void actionPerformed(ActionEvent e) {
+            if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateStep(+1);
+        }});
+        am.put("ann-start", new AbstractAction() { public void actionPerformed(ActionEvent e) {
+            if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateGoto(0);
+        }});
+        am.put("ann-end",   new AbstractAction() { public void actionPerformed(ActionEvent e) {
+            if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateGoto(controller.annotateTotal());
+        }});
+    }
+
+    /** Handle Mode → Annotate Game: open a file chooser, load the game,
+     *  enter annotate mode. If the user cancels or the file is invalid, the
+     *  previous mode is restored. */
+    private void enterAnnotateMode() {
+        JFileChooser fc = fileChooser(gameStartDir(), "Breakthrough game (.game)", "game");
+        if (fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            // User cancelled — restore previous radio selection.
+            syncModeRadio();
+            return;
+        }
+        Path p = fc.getSelectedFile().toPath();
+        lastGameDir = p.getParent();
+        try {
+            java.util.List<Move> moves = GameReplay.loadMoves(p);
+            if (moves.isEmpty()) {
+                error("Game file is empty — nothing to annotate.");
+                syncModeRadio();
+                return;
+            }
+            outputPanel.note("Mode: Annotate (" + p.getFileName() + ", " + moves.size() + " plies)");
+            controller.enterAnnotate(moves);
+            setTitle("Breakthrough — Annotate: " + p.getFileName());
+        } catch (IOException ex) {
+            error("Could not read file: " + ex.getMessage());
+            syncModeRadio();
+        } catch (IllegalArgumentException ex) {
+            error("Bad game file: " + ex.getMessage());
+            syncModeRadio();
+        }
+    }
+
+    /** Re-select the radio button corresponding to the controller's actual mode.
+     *  Used after a failed Annotate entry to undo the radio's visual change. */
+    private void syncModeRadio() {
+        switch (controller.mode()) {
+            case PLAY -> {
+                GameController.Side w = controller.whiteSide(), b = controller.blackSide();
+                if      (w == GameController.Side.ENGINE && b == GameController.Side.HUMAN)  modeMP1.setSelected(true);
+                else if (w == GameController.Side.HUMAN  && b == GameController.Side.ENGINE) modeMP2.setSelected(true);
+                else                                                                          modeTwoMachines.setSelected(true);
+            }
+            case ANALYSE  -> modeAnalyse.setSelected(true);
+            case ANNOTATE -> modeAnnotate.setSelected(true);
+        }
     }
 
     /* ----- entry point ----- */

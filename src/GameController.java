@@ -22,8 +22,13 @@ public class GameController {
     public enum Side  { HUMAN, ENGINE }
     /** PLAY = normal game (sides drive moves). ANALYSE = engine searches the
      *  current position continuously; the user can move pieces for either
-     *  side to explore variations. */
-    public enum Mode  { PLAY, ANALYSE }
+     *  side to explore variations.
+     *
+     *  ANNOTATE = walk through a previously-played game ply by ply. Engine
+     *  analyzes each position in the background; results are cached so
+     *  re-visiting a ply is instant. Click-to-move is disabled (you're
+     *  inspecting history). */
+    public enum Mode  { PLAY, ANALYSE, ANNOTATE }
 
     public interface Listener {
         /** Board state changed (move applied/undone, new game, etc). */
@@ -32,6 +37,11 @@ public class GameController {
         void statusChanged(String text);
         /** Engine progress: which side (Board.WHITE/BLACK) and a free-form line. */
         void engineProgress(byte side, String line);
+        /** Annotate-only: a completed ply analysis. Includes the played move
+         *  for that ply, the engine's best move, and whether they agree. */
+        default void annotateResult(int ply, Move played, Search.Result engineResult, boolean agrees) {}
+        /** Annotate state changed (current ply, total plies). Triggers toolbar updates. */
+        default void annotateStateChanged(int ply, int totalPlies) {}
         /** Game ended; result describes who won and how. */
         void gameOver(String result);
     }
@@ -54,6 +64,18 @@ public class GameController {
      *  controller sets this true to stop the running analysis, then clears
      *  it (allocates a fresh AtomicBoolean) before starting a new one. */
     private java.util.concurrent.atomic.AtomicBoolean analyseCancel
+        = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Annotate state. annotateMoves holds the full sequence of plies from the
+     *  loaded game. annotatePly is the index of the *next* ply to be played
+     *  (0 = starting position before any move; 1 = position after white's
+     *  first move; etc). annotateCache maps each ply index ≥ 1 to the
+     *  engine's analysis of the position *before* that ply (i.e. the position
+     *  from which the played move was chosen). */
+    private java.util.List<Move>             annotateMoves  = new java.util.ArrayList<>();
+    private int                              annotatePly    = 0;
+    private final java.util.Map<Integer, Search.Result> annotateCache = new java.util.HashMap<>();
+    private java.util.concurrent.atomic.AtomicBoolean annotateCancel
         = new java.util.concurrent.atomic.AtomicBoolean();
 
     /** True between SwingWorker.start and done. EDT-only. */
@@ -87,6 +109,7 @@ public class GameController {
     /* ----- public API used by Gui ----- */
 
     public void newGame() {
+        if (mode == Mode.ANNOTATE) leaveAnnotate();
         stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
@@ -107,6 +130,7 @@ public class GameController {
      * IllegalArgumentException if any move in the list is illegal at its turn.
      */
     public void loadGame(java.util.List<Move> moves) {
+        if (mode == Mode.ANNOTATE) leaveAnnotate();
         stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
@@ -159,6 +183,7 @@ public class GameController {
      * is cleared (we don't know what moves led to this position).
      */
     public void loadPosition(Board newBoard) {
+        if (mode == Mode.ANNOTATE) leaveAnnotate();
         stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
@@ -179,6 +204,7 @@ public class GameController {
     }
 
     public void setSides(Side white, Side black) {
+        if (mode == Mode.ANNOTATE) leaveAnnotate();
         stopAnalyse();
         currentGeneration++;
         thinkingNow = false;
@@ -196,20 +222,182 @@ public class GameController {
 
     /** Switch into Analyse Mode: stop any thinking, start a continuous search
      *  on the current position. The user can still click pieces to move
-     *  (for either side). Switching out of Analyse cancels the search. */
+     *  (for either side). Switching out of Analyse cancels the search.
+     *
+     *  Note: switching into ANNOTATE mode this way is invalid (no game
+     *  loaded); use enterAnnotate(List<Move>) instead. Switching *out* of
+     *  ANNOTATE to another mode is fine. */
     public void setMode(Mode newMode) {
         if (mode == newMode) return;
+        if (newMode == Mode.ANNOTATE) {
+            throw new IllegalStateException(
+                "Use enterAnnotate(moves) to switch into ANNOTATE mode");
+        }
+        Mode oldMode = mode;
         mode = newMode;
         stopAnalyse();              // always cancel any running analysis first
+        stopAnnotate();             // and any running annotate analysis
         currentGeneration++;        // invalidates any normal-play workers in flight
         thinkingNow = false;
+        if (oldMode == Mode.ANNOTATE) {
+            // Leaving Annotate: reset to a fresh starting position.
+            annotateMoves.clear();
+            annotateCache.clear();
+            annotatePly = 0;
+            board = Board.initial();
+            playedMoves.clear();
+            lastFromSq = -1; lastToSq = -1;
+            fireBoardChanged();
+            fireAnnotateStateChanged();
+        }
         if (mode == Mode.ANALYSE) {
             startAnalyse();
         } else {
-            // Returning to PLAY mode: pick up where we are.
             maybeKickEngine();
         }
         updateStatus();
+    }
+
+    /**
+     * Enter Annotate Mode with the given sequence of moves. Validates that
+     * each move is legal at its turn; throws IllegalArgumentException if not
+     * (with the offending ply number). Starts at ply 0 (the initial position
+     * before any move has been played).
+     */
+    public void enterAnnotate(java.util.List<Move> moves) {
+        // Validate by replaying onto a scratch board.
+        Board scratch = Board.initial();
+        for (int i = 0; i < moves.size(); i++) {
+            Move m = moves.get(i);
+            int packed = (m.fromRow() * 8 + m.fromCol()) << 6 | (m.toRow() * 8 + m.toCol());
+            int[] buf = new int[MoveGenerator.MAX_MOVES];
+            int n = MoveGenerator.generate(scratch, buf);
+            boolean legal = false;
+            for (int j = 0; j < n; j++) if (buf[j] == packed) { legal = true; break; }
+            if (!legal) throw new IllegalArgumentException("Illegal move at ply " + (i + 1) + ": " + m);
+            scratch.apply(m);
+        }
+        // All moves legal — switch state atomically.
+        stopAnalyse();
+        stopAnnotate();
+        currentGeneration++;
+        thinkingNow = false;
+        mode = Mode.ANNOTATE;
+        annotateMoves = new java.util.ArrayList<>(moves);
+        annotateCache.clear();
+        annotatePly = 0;
+        board = Board.initial();
+        playedMoves.clear();
+        lastFromSq = -1; lastToSq = -1;
+        selectedSq = -1; destinations = 0L;
+        fireBoardChanged();
+        fireAnnotateStateChanged();
+        updateStatus();
+        // If there's a next ply to analyse, start.
+        kickAnnotateIfNeeded();
+    }
+
+    /** Step to a specific ply index. 0 = starting position; N = after Nth ply.
+     *  Out-of-range values are clamped. */
+    public void annotateGoto(int newPly) {
+        if (mode != Mode.ANNOTATE) return;
+        newPly = Math.max(0, Math.min(newPly, annotateMoves.size()));
+        if (newPly == annotatePly) return;
+        stopAnnotate();
+        currentGeneration++;
+        // Rebuild board at the requested ply.
+        Board b = Board.initial();
+        for (int i = 0; i < newPly; i++) b.apply(annotateMoves.get(i));
+        board = b;
+        annotatePly = newPly;
+        // Last-move highlight on the move just played, if any.
+        if (newPly > 0) {
+            Move m = annotateMoves.get(newPly - 1);
+            lastFromSq = m.fromRow() * 8 + m.fromCol();
+            lastToSq   = m.toRow()   * 8 + m.toCol();
+        } else {
+            lastFromSq = -1; lastToSq = -1;
+        }
+        selectedSq = -1; destinations = 0L;
+        fireBoardChanged();
+        fireAnnotateStateChanged();
+        updateStatus();
+        kickAnnotateIfNeeded();
+    }
+
+    public void annotateStep(int delta) { annotateGoto(annotatePly + delta); }
+    public int  annotatePly()           { return annotatePly; }
+    public int  annotateTotal()         { return annotateMoves.size(); }
+    public java.util.List<Move> annotateMoves() {
+        return java.util.Collections.unmodifiableList(annotateMoves);
+    }
+
+    /** Start the engine analyzing the *current* position (the one shown on
+     *  the board). When the search completes, fires annotateResult on the
+     *  listener with the played move (if there is one) and the engine's
+     *  result. If the result is already cached, fires immediately without
+     *  re-searching. */
+    private void kickAnnotateIfNeeded() {
+        if (mode != Mode.ANNOTATE) return;
+        // At ply==total, the game is finished; nothing to analyse.
+        if (annotatePly >= annotateMoves.size()) return;
+
+        final int  plyAtLaunch = annotatePly;
+        final Move played      = annotateMoves.get(plyAtLaunch);
+        // The result is cached by *next ply index* — i.e. plyAtLaunch+1 is the
+        // ply that was played from the current position. Use that as the key.
+        final int  cacheKey    = plyAtLaunch + 1;
+
+        Search.Result cached = annotateCache.get(cacheKey);
+        if (cached != null) {
+            // Hit — fire immediately, no engine run.
+            fireAnnotateResult(cacheKey, played, cached);
+            return;
+        }
+
+        // Miss — run the engine in a background thread.
+        final String fen = board.toFen();
+        final EngineSettings cfg = whiteSettings;   // annotate always uses MP1 settings
+        final long generation = currentGeneration;
+        final byte searchSide = board.side();
+        annotateCancel = new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean myCancel = annotateCancel;
+
+        Thread t = new Thread(() -> {
+            Board copy = Board.fromFen(fen);
+            Search s = cfg.buildSearch();
+            Search.Result r = s.findBest(copy, cfg.depth, myCancel::get, null);
+            SwingUtilities.invokeLater(() -> {
+                if (generation != currentGeneration) return;     // user moved on
+                if (r.bestMove == null) return;                  // search aborted
+                annotateCache.put(cacheKey, r);
+                // Forward as a progress line too, so the live engine output
+                // panel shows what just happened.
+                String line = String.format(
+                    "(annotate ply %d) depth=%d  best=%s  score=%+d  nodes=%d  %d ms",
+                    cacheKey, r.depth, r.bestMove, r.score, r.nodes, r.ms);
+                if (listener != null) listener.engineProgress(searchSide, line);
+                fireAnnotateResult(cacheKey, played, r);
+            });
+        }, "BreakthroughAnnotate");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void stopAnnotate() {
+        if (annotateCancel != null) annotateCancel.set(true);
+    }
+
+    /** Reset annotate state to "no game loaded" and revert mode to PLAY.
+     *  Called by the various reset methods (newGame, loadGame, etc) when they
+     *  fire while we're in Annotate mode. */
+    private void leaveAnnotate() {
+        stopAnnotate();
+        annotateMoves.clear();
+        annotateCache.clear();
+        annotatePly = 0;
+        mode = Mode.PLAY;
+        fireAnnotateStateChanged();
     }
 
     public EngineSettings whiteSettings() { return whiteSettings; }
@@ -238,6 +426,7 @@ public class GameController {
     public void onClick(int row, int col) {
         if (thinkingNow) return;                       // ignore clicks while engine thinks
         if (board.winner() != Board.EMPTY) return;     // game over
+        if (mode == Mode.ANNOTATE) return;             // annotate is read-only history
         // In PLAY mode: only the human side may move. In ANALYSE mode: any
         // human can move for any side (you're exploring lines).
         if (mode == Mode.PLAY && sideToMoveIsEngine()) return;
@@ -438,6 +627,13 @@ public class GameController {
     private void fireGameOver(String result) {
         if (listener != null) listener.gameOver(result);
     }
+    private void fireAnnotateStateChanged() {
+        if (listener != null) listener.annotateStateChanged(annotatePly, annotateMoves.size());
+    }
+    private void fireAnnotateResult(int ply, Move played, Search.Result r) {
+        boolean agrees = r.bestMove != null && r.bestMove.toString().equals(played.toString());
+        if (listener != null) listener.annotateResult(ply, played, r, agrees);
+    }
     private void updateStatus() {
         if (listener == null) return;
         byte w = board.winner();
@@ -448,6 +644,18 @@ public class GameController {
         String stm = (board.side() == Board.WHITE) ? "White" : "Black";
         if (mode == Mode.ANALYSE) {
             listener.statusChanged("Analysing — " + stm + " to move. Click any piece to explore.");
+            return;
+        }
+        if (mode == Mode.ANNOTATE) {
+            int total = annotateMoves.size();
+            int moveNum = (annotatePly + 1) / 2 + ((annotatePly > 0 && (annotatePly & 1) == 0) ? 0 : 0);
+            String pos = annotatePly + " / " + total;
+            if (annotatePly < total) {
+                Move next = annotateMoves.get(annotatePly);
+                listener.statusChanged("Annotate ply " + pos + " — " + stm + " to play " + next);
+            } else {
+                listener.statusChanged("Annotate ply " + pos + " — end of game");
+            }
             return;
         }
         String controller = (sideToMoveIsEngine() ? "engine" : "human");

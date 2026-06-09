@@ -42,6 +42,14 @@ public class Gui extends JFrame implements GameController.Listener {
     private JLabel  annotateLabel;
     private JPanel  southStack;   // holds annotateBar above the status line
 
+    /* Evaluation graph window — separate non-modal dialog so the user can
+     * position it where they want. */
+    private JDialog        evalDialog;
+    private EvalGraphPanel evalGraph;
+    private JCheckBoxMenuItem evalGraphMenuItem;
+    /** Current theme, kept so the eval graph window can be re-themed. */
+    private Theme currentTheme = Theme.CLASSIC;
+
     /* Last-used directories for the file choosers, remembered for the
      * lifetime of this window. Initialized lazily on first open/save so we
      * default to ./saves and ./positions if those exist. */
@@ -95,7 +103,7 @@ public class Gui extends JFrame implements GameController.Listener {
 
         // File
         JMenu file = new JMenu("File");
-        file.add(action("New Game",        KeyEvent.VK_N, e -> { outputPanel.note("New game"); controller.newGame(); }));
+        file.add(action("New Game",        KeyEvent.VK_N, e -> { outputPanel.note("New game"); clearEvalGraph(); controller.newGame(); }));
         file.add(action("Load Game...",    KeyEvent.VK_O, e -> loadGame()));
         file.add(action("Load Position...", 0,            e -> loadPosition()));
         file.addSeparator();
@@ -124,7 +132,10 @@ public class Gui extends JFrame implements GameController.Listener {
         engOut.setToolTipText("Show or hide the engine output panel on the right");
         engOut.addActionListener(e -> setEngineOutputVisible(engOut.isSelected()));
         view.add(engOut);
-        view.add(stub("Evaluation Graph"));
+        evalGraphMenuItem = new JCheckBoxMenuItem("Evaluation Graph", false);
+        evalGraphMenuItem.setToolTipText("Show or hide the evaluation graph window");
+        evalGraphMenuItem.addActionListener(e -> setEvalGraphVisible(evalGraphMenuItem.isSelected()));
+        view.add(evalGraphMenuItem);
         view.add(buildColorsMenu());
         mb.add(view);
 
@@ -217,9 +228,59 @@ public class Gui extends JFrame implements GameController.Listener {
 
     /** Push a theme out to every panel that paints. */
     private void applyTheme(Theme t) {
+        currentTheme = t;
         boardPanel.setTheme(t);
         outputPanel.setTheme(t);
+        if (evalGraph != null) evalGraph.setTheme(t);
         outputPanel.note("Theme: " + t.name);
+    }
+
+    /* ----- Evaluation graph ----- */
+
+    /** Lazy-create and show/hide the eval graph dialog. */
+    private void setEvalGraphVisible(boolean show) {
+        if (show) {
+            if (evalDialog == null) {
+                evalGraph = new EvalGraphPanel();
+                evalGraph.setTheme(currentTheme);
+                evalGraph.setClickListener(this::onEvalPointClicked);
+                evalDialog = new JDialog(this, "Evaluation graph", false);
+                evalDialog.setContentPane(evalGraph);
+                evalDialog.setSize(560, 280);
+                evalDialog.setLocationRelativeTo(this);
+                evalDialog.setDefaultCloseOperation(JDialog.HIDE_ON_CLOSE);
+                // Sync the menu when the user closes the window directly.
+                evalDialog.addWindowListener(new java.awt.event.WindowAdapter() {
+                    @Override public void windowClosing(java.awt.event.WindowEvent e) {
+                        evalGraphMenuItem.setSelected(false);
+                    }
+                });
+            }
+            evalDialog.setVisible(true);
+        } else if (evalDialog != null) {
+            evalDialog.setVisible(false);
+        }
+    }
+
+    /** Click handler for points: in Annotate mode, jump to that ply. */
+    private void onEvalPointClicked(int ply) {
+        if (controller.mode() == GameController.Mode.ANNOTATE) {
+            controller.annotateGoto(ply);
+        }
+    }
+
+    /** Add a point to the graph, converting score to White's perspective.
+     *  Engine scores are from the side-to-move's view; we negate when Black is
+     *  to move so positive always means White-ahead. */
+    private void addEvalPoint(int ply, byte sideToMove, int rawScore) {
+        if (evalGraph == null) return;   // graph hasn't been opened yet
+        int whiteScore = (sideToMove == Board.WHITE) ? rawScore : -rawScore;
+        evalGraph.addPoint(new EvalGraphPanel.EvalPoint(ply, whiteScore));
+    }
+
+    /** Clear the graph (called on new game, mode change, etc). */
+    private void clearEvalGraph() {
+        if (evalGraph != null) evalGraph.clear();
     }
 
     private void showAbout() {
@@ -455,6 +516,9 @@ public class Gui extends JFrame implements GameController.Listener {
             btnPrev .setEnabled(ply > 0);
             btnNext .setEnabled(ply < totalPlies);
             btnEnd  .setEnabled(ply < totalPlies);
+            if (evalGraph != null) evalGraph.setCurrentPly(ply);
+        } else {
+            if (evalGraph != null) evalGraph.setCurrentPly(-1);
         }
         // revalidate so the toolbar appearing/disappearing is reflected.
         southStack.revalidate();
@@ -464,6 +528,13 @@ public class Gui extends JFrame implements GameController.Listener {
         String line = String.format("Ply %d: played %s — depth %d score %+d  (%s)",
                                     ply, played, r.depth, r.score, tag);
         outputPanel.note(line);
+        // The annotated score is from the perspective of the side that played
+        // this ply. Ply N: ply 1 = White played, ply 2 = Black played, etc.
+        byte sideThatMoved = ((ply & 1) == 1) ? Board.WHITE : Board.BLACK;
+        addEvalPoint(ply, sideThatMoved, r.score);
+    }
+    @Override public void engineMoveCompleted(int ply, byte side, Search.Result r) {
+        addEvalPoint(ply, side, r.score);
     }
 
     /** Show or hide the right-side engine output panel.
@@ -556,6 +627,7 @@ public class Gui extends JFrame implements GameController.Listener {
                 return;
             }
             outputPanel.note("Mode: Annotate (" + p.getFileName() + ", " + moves.size() + " plies)");
+            clearEvalGraph();
             controller.enterAnnotate(moves);
             setTitle("Breakthrough — Annotate: " + p.getFileName());
         } catch (IOException ex) {

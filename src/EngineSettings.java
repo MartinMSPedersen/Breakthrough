@@ -24,8 +24,8 @@ public final class EngineSettings {
 
     public static EngineSettings defaults() {
         return new EngineSettings(
-            6,                                       // sane interactive default
-            20,                                      // 1M entries, ~32 MB
+            8,                                       // strong default; ~2-3s per move
+            24,                                      // 16M entries, ~512 MB
             Evaluator.DEFAULT_WEIGHTS,
             Evaluator.DEFAULT_DEFENDER_SCALE
         );

@@ -42,6 +42,10 @@ public class GameController {
         default void annotateResult(int ply, Move played, Search.Result engineResult, boolean agrees) {}
         /** Annotate state changed (current ply, total plies). Triggers toolbar updates. */
         default void annotateStateChanged(int ply, int totalPlies) {}
+        /** Play / Two Machines: an engine search just completed and its move
+         *  is about to be applied. ply is 1-based (the ply about to be played).
+         *  side is the side whose move it is. Useful for graphing evaluation. */
+        default void engineMoveCompleted(int ply, byte side, Search.Result r) {}
         /** Game ended; result describes who won and how. */
         void gameOver(String result);
     }
@@ -545,8 +549,8 @@ public class GameController {
         thinkingNow = true;
         updateStatus();
 
-        SwingWorker<Move, String> worker = new SwingWorker<>() {
-            @Override protected Move doInBackground() {
+        SwingWorker<Search.Result, String> worker = new SwingWorker<>() {
+            @Override protected Search.Result doInBackground() {
                 Board copy = Board.fromFen(fen);
                 Search s = cfg.buildSearch();
                 long t0 = System.currentTimeMillis();
@@ -554,7 +558,7 @@ public class GameController {
                 long ms = System.currentTimeMillis() - t0;
                 publish(String.format("depth=%d  best=%s  score=%+d  nodes=%d  %d ms",
                                        r.depth, r.bestMove, r.score, r.nodes, ms));
-                return r.bestMove;
+                return r;
             }
             @Override protected void process(List<String> lines) {
                 if (generation != currentGeneration) return;
@@ -564,8 +568,13 @@ public class GameController {
                 thinkingNow = false;
                 if (generation != currentGeneration) { updateStatus(); return; }
                 try {
-                    Move m = get();
-                    if (m != null) applyMove(m);
+                    Search.Result r = get();
+                    if (r != null && r.bestMove != null) {
+                        // ply about to be played is playedMoves.size() + 1.
+                        int ply = playedMoves.size() + 1;
+                        if (listener != null) listener.engineMoveCompleted(ply, searchSide, r);
+                        applyMove(r.bestMove);
+                    }
                 } catch (Exception ex) {
                     if (listener != null) listener.statusChanged("Engine error: " + ex.getMessage());
                 }

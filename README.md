@@ -43,7 +43,7 @@ Notes:
 - Built on x86_64 produces an x86_64 AppImage. For ARM you'd build on
   ARM with an ARM JDK.
 - The host needs `fuse` to run AppImages — almost every Linux desktop
-  has it, including Xubuntu.
+  has it.
 - `make clean` removes the AppImage and build artifacts but keeps the
   cached appimagetool. `make dist-clean` removes that too.
 

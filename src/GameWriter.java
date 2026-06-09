@@ -25,19 +25,40 @@ public final class GameWriter {
     private static final DateTimeFormatter HEADER_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     public static Path save(List<Move> moves, String resultLine, String finalFen) throws IOException {
-        return save(moves, resultLine, finalFen, DEFAULT_DIR);
+        return save(moves, resultLine, finalFen, DEFAULT_DIR, java.util.Map.of());
     }
 
     public static Path save(List<Move> moves, String resultLine, String finalFen, Path dir) throws IOException {
+        return save(moves, resultLine, finalFen, dir, java.util.Map.of());
+    }
+
+    /** Save with PGN-style tags written as a leading `# Tag: value` block. */
+    public static Path save(List<Move> moves, String resultLine, String finalFen, Path dir,
+                            java.util.Map<String, String> tags) throws IOException {
         Files.createDirectories(dir);
         LocalDateTime now = LocalDateTime.now();
         Path out = dir.resolve("breakthrough-" + now.format(FNAME_FMT) + ".game");
 
         StringBuilder sb = new StringBuilder();
         sb.append("# Breakthrough game (8x8)\n");
+        // User tags first — they're the interesting metadata.
+        if (tags != null) {
+            for (var e : tags.entrySet()) {
+                String v = e.getValue();
+                if (v != null && !v.isBlank()) {
+                    sb.append("# ").append(e.getKey()).append(": ").append(v.trim()).append('\n');
+                }
+            }
+        }
         sb.append("# Saved:     ").append(now.format(HEADER_FMT)).append('\n');
         sb.append("# Plies:     ").append(moves.size()).append('\n');
-        sb.append("# Result:    ").append(resultLine).append('\n');
+        // Skip auto-Result if the user already provided one in tags.
+        boolean userHasResult = tags != null && tags.containsKey("Result")
+                                && tags.get("Result") != null
+                                && !tags.get("Result").isBlank();
+        if (!userHasResult) {
+            sb.append("# Result:    ").append(resultLine).append('\n');
+        }
         if (finalFen != null) {
             sb.append("# Final FEN: ").append(finalFen).append('\n');
         }

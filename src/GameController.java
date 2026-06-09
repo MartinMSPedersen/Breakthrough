@@ -27,8 +27,13 @@ public class GameController {
      *  ANNOTATE = walk through a previously-played game ply by ply. Engine
      *  analyzes each position in the background; results are cached so
      *  re-visiting a ply is instant. Click-to-move is disabled (you're
-     *  inspecting history). */
-    public enum Mode  { PLAY, ANALYSE, ANNOTATE }
+     *  inspecting history).
+     *
+     *  EDIT_POSITION = the user is placing/removing pieces on the board.
+     *  Clicks set squares to the currently-selected palette piece (W, B,
+     *  or empty). Engine activity is suspended. Exiting via commit applies
+     *  the edited position (clearing move history); cancelling reverts. */
+    public enum Mode  { PLAY, ANALYSE, ANNOTATE, EDIT_POSITION }
 
     public interface Listener {
         /** Board state changed (move applied/undone, new game, etc). */
@@ -54,6 +59,10 @@ public class GameController {
     private Board board;
     private final List<Move> playedMoves = new ArrayList<>();
     private int  lastFromSq = -1, lastToSq = -1;
+    /** Game tags (PGN-style metadata: White, Black, Event, Site, Date, Result).
+     *  Loaded from `# Tag: value` comment lines and written back on save.
+     *  Insertion-ordered so the saved tag block reads predictably. */
+    private final java.util.LinkedHashMap<String, String> tags = new java.util.LinkedHashMap<>();
 
     private Side whiteSide = Side.HUMAN;
     private Side blackSide = Side.ENGINE;
@@ -119,6 +128,7 @@ public class GameController {
         thinkingNow = false;
         board = Board.initial();
         playedMoves.clear();
+        tags.clear();
         lastFromSq = -1; lastToSq = -1;
         selectedSq = -1; destinations = 0L;
         
@@ -161,6 +171,7 @@ public class GameController {
         board = b;
         playedMoves.clear();
         playedMoves.addAll(moves);
+        tags.clear();
         if (!moves.isEmpty()) {
             Move last = moves.get(moves.size() - 1);
             lastFromSq = last.fromRow() * 8 + last.fromCol();
@@ -193,6 +204,7 @@ public class GameController {
         thinkingNow = false;
         board = newBoard;
         playedMoves.clear();
+        tags.clear();
         lastFromSq = -1; lastToSq = -1;
         selectedSq = -1; destinations = 0L;
         
@@ -404,6 +416,109 @@ public class GameController {
         fireAnnotateStateChanged();
     }
 
+    /* ----- Edit Position ----- */
+    /** Snapshot of state taken on entry to EDIT_POSITION. Restored if the user
+     *  cancels rather than committing. */
+    private String  editSnapshotFen;
+    private java.util.List<Move> editSnapshotMoves;
+
+    /** Enter EDIT_POSITION mode. Snapshots the current board+history; the
+     *  user can now place/remove pieces. Call editCommit() or editCancel()
+     *  to exit. */
+    public void enterEditPosition() {
+        if (mode == Mode.EDIT_POSITION) return;
+        if (mode == Mode.ANNOTATE) leaveAnnotate();
+        stopAnalyse();
+        currentGeneration++;
+        thinkingNow = false;
+        editSnapshotFen   = board.toFen();
+        editSnapshotMoves = new java.util.ArrayList<>(playedMoves);
+        mode = Mode.EDIT_POSITION;
+        selectedSq = -1; destinations = 0L;
+        lastFromSq = -1; lastToSq = -1;
+        fireBoardChanged();
+        updateStatus();
+    }
+
+    /** Place a piece (or empty) at the given square. EDT-only. No-op if not
+     *  in EDIT_POSITION mode. */
+    public void editPlacePiece(int row, int col, byte piece) {
+        if (mode != Mode.EDIT_POSITION) return;
+        if (row < 0 || row > 7 || col < 0 || col > 7) return;
+        if (piece != Board.EMPTY && piece != Board.WHITE && piece != Board.BLACK) return;
+        board.set(row, col, piece);
+        fireBoardChanged();
+    }
+
+    /** Clear the board. */
+    public void editClearBoard() {
+        if (mode != Mode.EDIT_POSITION) return;
+        for (int r = 0; r < 8; r++) for (int c = 0; c < 8; c++) board.set(r, c, Board.EMPTY);
+        fireBoardChanged();
+    }
+
+    /** Reset the board to the standard Breakthrough starting position. */
+    public void editResetBoard() {
+        if (mode != Mode.EDIT_POSITION) return;
+        Board fresh = Board.initial();
+        for (int r = 0; r < 8; r++) for (int c = 0; c < 8; c++) board.set(r, c, fresh.get(r, c));
+        fireBoardChanged();
+    }
+
+    /** Flip side-to-move. */
+    public void editFlipSideToMove() {
+        if (mode != Mode.EDIT_POSITION) return;
+        // Board only exposes side via FEN — reconstruct with the opposite side.
+        String fen = board.toFen();
+        // FEN ends with " W" or " B". Flip the last token.
+        String flipped;
+        if (fen.endsWith(" W"))      flipped = fen.substring(0, fen.length() - 1) + "B";
+        else if (fen.endsWith(" B")) flipped = fen.substring(0, fen.length() - 1) + "W";
+        else                          flipped = fen;
+        board = Board.fromFen(flipped);
+        fireBoardChanged();
+        updateStatus();
+    }
+
+    /** Commit the edited position. Move history is cleared (we don't know
+     *  what led to this position). Mode returns to PLAY. */
+    public void editCommit() {
+        if (mode != Mode.EDIT_POSITION) return;
+        editSnapshotFen = null;
+        editSnapshotMoves = null;
+        playedMoves.clear();
+        tags.clear();
+        lastFromSq = -1; lastToSq = -1;
+        mode = Mode.PLAY;
+        fireBoardChanged();
+        updateStatus();
+        // Check for instant game-over on the committed position.
+        byte w = board.winner();
+        if (w != Board.EMPTY) {
+            fireGameOver((w == Board.WHITE ? "White" : "Black") + " wins");
+        } else {
+            maybeKickEngine();
+        }
+    }
+
+    /** Cancel the edit; restore the snapshot. */
+    public void editCancel() {
+        if (mode != Mode.EDIT_POSITION) return;
+        board = Board.fromFen(editSnapshotFen);
+        playedMoves.clear();
+        playedMoves.addAll(editSnapshotMoves);
+        if (!playedMoves.isEmpty()) {
+            Move last = playedMoves.get(playedMoves.size() - 1);
+            lastFromSq = last.fromRow() * 8 + last.fromCol();
+            lastToSq   = last.toRow()   * 8 + last.toCol();
+        }
+        editSnapshotFen = null;
+        editSnapshotMoves = null;
+        mode = Mode.PLAY;
+        fireBoardChanged();
+        updateStatus();
+    }
+
     public EngineSettings whiteSettings() { return whiteSettings; }
     public EngineSettings blackSettings() { return blackSettings; }
     public void setWhiteSettings(EngineSettings s) { this.whiteSettings = s; }
@@ -421,6 +536,20 @@ public class GameController {
     public List<Move> playedMoves() { return playedMoves; }
     public boolean isThinking() { return thinkingNow; }
 
+    /** Returns a defensive copy of the game tags. */
+    public java.util.LinkedHashMap<String, String> tags() {
+        return new java.util.LinkedHashMap<>(tags);
+    }
+    /** Replace all tags. Empty values are dropped to avoid writing empty
+     *  `# Tag: ` lines to the saved file. */
+    public void setTags(java.util.Map<String, String> newTags) {
+        tags.clear();
+        for (var e : newTags.entrySet()) {
+            String v = e.getValue();
+            if (v != null && !v.isBlank()) tags.put(e.getKey(), v.trim());
+        }
+    }
+
     /* ----- click handling ----- */
 
     /**
@@ -429,6 +558,7 @@ public class GameController {
      */
     public void onClick(int row, int col) {
         if (thinkingNow) return;                       // ignore clicks while engine thinks
+        if (mode == Mode.EDIT_POSITION) return;        // GUI uses editPlacePiece in this mode
         if (board.winner() != Board.EMPTY) return;     // game over
         if (mode == Mode.ANNOTATE) return;             // annotate is read-only history
         // In PLAY mode: only the human side may move. In ANALYSE mode: any
@@ -645,6 +775,13 @@ public class GameController {
     }
     private void updateStatus() {
         if (listener == null) return;
+        // In EDIT_POSITION, the board may not even be legal; don't try to
+        // interpret it. Just say what mode we're in.
+        if (mode == Mode.EDIT_POSITION) {
+            String stm = (board.side() == Board.WHITE) ? "White" : "Black";
+            listener.statusChanged("Editing position — " + stm + " to move. Use the toolbar to place pieces.");
+            return;
+        }
         byte w = board.winner();
         if (w != Board.EMPTY) {
             listener.statusChanged((w == Board.WHITE ? "White" : "Black") + " wins.");

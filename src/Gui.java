@@ -50,6 +50,12 @@ public class Gui extends JFrame implements GameController.Listener {
     /** Current theme, kept so the eval graph window can be re-themed. */
     private Theme currentTheme = Theme.CLASSIC;
 
+    /* Edit-position toolbar — south of the board, only visible in EDIT_POSITION
+     * mode. The radio buttons inside it pick what to place on the next click. */
+    private JPanel  editPosBar;
+    /** What the next click in edit-mode will place. WHITE/BLACK/EMPTY (byte). */
+    private byte    editPalette = Board.WHITE;
+
     /* Last-used directories for the file choosers, remembered for the
      * lifetime of this window. Initialized lazily on first open/save so we
      * default to ./saves and ./positions if those exist. */
@@ -59,10 +65,11 @@ public class Gui extends JFrame implements GameController.Listener {
     public Gui() {
         super("Breakthrough");
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+        setIconImages(buildAppIcons());
 
         setJMenuBar(buildMenuBar());
 
-        boardPanel.setClickListener(controller::onClick);
+        boardPanel.setClickListener(this::onBoardClick);
         controller.setListener(this);
 
         status.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
@@ -76,12 +83,19 @@ public class Gui extends JFrame implements GameController.Listener {
         split.setDividerSize(6);
         add(split, BorderLayout.CENTER);
 
-        // Annotate toolbar: hidden by default, shown only in Annotate mode.
+        // Annotate and Edit-Position toolbars: hidden by default, only one
+        // appears at a time depending on mode.
         annotateBar = buildAnnotateBar();
         annotateBar.setVisible(false);
+        editPosBar = buildEditPosBar();
+        editPosBar.setVisible(false);
+        // Both go on top of the status line via a small vertical Box.
+        Box bars = Box.createVerticalBox();
+        bars.add(annotateBar);
+        bars.add(editPosBar);
         southStack = new JPanel(new BorderLayout());
-        southStack.add(annotateBar, BorderLayout.NORTH);
-        southStack.add(status,      BorderLayout.SOUTH);
+        southStack.add(bars,   BorderLayout.NORTH);
+        southStack.add(status, BorderLayout.SOUTH);
         add(southStack, BorderLayout.SOUTH);
 
         pack();
@@ -115,8 +129,8 @@ public class Gui extends JFrame implements GameController.Listener {
 
         // Edit
         JMenu edit = new JMenu("Edit");
-        edit.add(stub("Edit Tags"));
-        edit.add(stub("Edit Position"));
+        edit.add(action("Edit Tags", 0, e -> editTagsDialog()));
+        edit.add(action("Edit Position", 0, e -> enterEditPosition()));
         mb.add(edit);
 
         // View
@@ -283,6 +297,154 @@ public class Gui extends JFrame implements GameController.Listener {
         if (evalGraph != null) evalGraph.clear();
     }
 
+    /** Standard set of game tags that the dialog always exposes. The user can
+     *  edit any existing values and optionally fill in blanks; saving with
+     *  blank values just drops those tags. */
+    private static final String[] STANDARD_TAGS = {
+        "White", "Black", "Event", "Site", "Date", "Result"
+    };
+
+    /** Edit → Edit Tags: PGN-style metadata for the current game. */
+    private void editTagsDialog() {
+        java.util.LinkedHashMap<String, String> current = controller.tags();
+        // Merge: start with standard tags (empty), overlay existing values.
+        java.util.LinkedHashMap<String, String> values = new java.util.LinkedHashMap<>();
+        for (String name : STANDARD_TAGS) values.put(name, "");
+        values.putAll(current);  // keeps any non-standard tags too
+
+        JPanel form = new JPanel(new GridBagLayout());
+        GridBagConstraints gc = new GridBagConstraints();
+        gc.insets = new Insets(3, 4, 3, 4);
+        gc.fill = GridBagConstraints.HORIZONTAL;
+        java.util.LinkedHashMap<String, JTextField> fields = new java.util.LinkedHashMap<>();
+        int row = 0;
+        for (var e : values.entrySet()) {
+            gc.gridx = 0; gc.gridy = row; gc.weightx = 0;
+            form.add(new JLabel(e.getKey() + ":"), gc);
+            gc.gridx = 1; gc.weightx = 1;
+            JTextField tf = new JTextField(e.getValue(), 24);
+            form.add(tf, gc);
+            fields.put(e.getKey(), tf);
+            row++;
+        }
+
+        int rc = JOptionPane.showConfirmDialog(this, form, "Edit tags",
+                                               JOptionPane.OK_CANCEL_OPTION,
+                                               JOptionPane.PLAIN_MESSAGE);
+        if (rc != JOptionPane.OK_OPTION) return;
+
+        java.util.LinkedHashMap<String, String> updated = new java.util.LinkedHashMap<>();
+        for (var e : fields.entrySet()) updated.put(e.getKey(), e.getValue().getText());
+        controller.setTags(updated);
+        outputPanel.note("Tags updated.");
+    }
+
+    /* ----- Edit Position ----- */
+
+    /** Build the south-bar widget for edit-position mode. Three radio buttons
+     *  pick the palette, then action buttons for Clear/Reset/Flip/OK/Cancel. */
+    private JPanel buildEditPosBar() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 4));
+        bar.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(0xA0, 0xA0, 0xA0)));
+
+        JLabel place = new JLabel("Place:");
+        ButtonGroup palette = new ButtonGroup();
+        JRadioButton rbW = new JRadioButton("White", true);
+        JRadioButton rbB = new JRadioButton("Black");
+        JRadioButton rbE = new JRadioButton("Empty");
+        rbW.addActionListener(e -> editPalette = Board.WHITE);
+        rbB.addActionListener(e -> editPalette = Board.BLACK);
+        rbE.addActionListener(e -> editPalette = Board.EMPTY);
+        palette.add(rbW); palette.add(rbB); palette.add(rbE);
+        bar.add(place); bar.add(rbW); bar.add(rbB); bar.add(rbE);
+
+        bar.add(Box.createHorizontalStrut(8));
+        bar.add(new JSeparator(SwingConstants.VERTICAL));
+        bar.add(Box.createHorizontalStrut(8));
+
+        JButton bFlip  = new JButton("Flip side to move");
+        JButton bClear = new JButton("Clear board");
+        JButton bReset = new JButton("Reset to start");
+        bFlip .addActionListener(e -> controller.editFlipSideToMove());
+        bClear.addActionListener(e -> controller.editClearBoard());
+        bReset.addActionListener(e -> controller.editResetBoard());
+        bar.add(bFlip); bar.add(bClear); bar.add(bReset);
+
+        bar.add(Box.createHorizontalStrut(8));
+        bar.add(new JSeparator(SwingConstants.VERTICAL));
+        bar.add(Box.createHorizontalStrut(8));
+
+        JButton bOk     = new JButton("OK");
+        JButton bCancel = new JButton("Cancel");
+        bOk    .addActionListener(e -> commitEditPosition());
+        bCancel.addActionListener(e -> cancelEditPosition());
+        bar.add(bOk); bar.add(bCancel);
+
+        return bar;
+    }
+
+    /** Enter Edit Position mode: tell the controller, show the toolbar. */
+    private void enterEditPosition() {
+        outputPanel.note("Editing position");
+        controller.enterEditPosition();
+        editPosBar.setVisible(true);
+        southStack.revalidate();
+    }
+
+    private void commitEditPosition() {
+        controller.editCommit();
+        editPosBar.setVisible(false);
+        southStack.revalidate();
+        outputPanel.note("Position committed (move history cleared)");
+        // Restore the radio in the Mode menu since editCommit returns to PLAY.
+        syncModeRadio();
+    }
+
+    private void cancelEditPosition() {
+        controller.editCancel();
+        editPosBar.setVisible(false);
+        southStack.revalidate();
+        outputPanel.note("Edit cancelled");
+        syncModeRadio();
+    }
+
+    /** Route clicks: in EDIT_POSITION mode, place the palette piece on the
+     *  clicked square; otherwise, normal click logic. */
+    private void onBoardClick(int row, int col) {
+        if (controller.mode() == GameController.Mode.EDIT_POSITION) {
+            controller.editPlacePiece(row, col, editPalette);
+        } else {
+            controller.onClick(row, col);
+        }
+    }
+
+    /** Render the app icon at several sizes by drawing a small board snapshot.
+     *  Java/the desktop will pick the appropriate size for window title bar,
+     *  taskbar, alt-tab, etc. We only render sizes large enough for pieces
+     *  to actually be visible; the OS bilinearly downscales for small
+     *  contexts (16x16 etc.). */
+    private static java.util.List<java.awt.image.BufferedImage> buildAppIcons() {
+        // Mid-game-ish position so the icon isn't just a checkerboard with two solid rows.
+        Board b = Board.fromFen("OOOOOOOO/O1O1OOOO/2O5/4X3/2O1X3/8/XXX1XXXX/XXXXXXXX W");
+        int[] sizes = { 64, 128, 256 };
+        java.util.List<java.awt.image.BufferedImage> icons = new java.util.ArrayList<>();
+        for (int s : sizes) {
+            BoardPanel p = new BoardPanel();
+            p.setSize(s, s);
+            p.setBoard(b);
+            p.setShowLabels(false);
+            p.setLastMove(3 * 8 + 4, 4 * 8 + 4);  // e4 → e5, splash of yellow
+            java.awt.image.BufferedImage img =
+                new java.awt.image.BufferedImage(s, s, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g = img.createGraphics();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            p.paint(g);
+            g.dispose();
+            icons.add(img);
+        }
+        return icons;
+    }
+
     private void showAbout() {
         JOptionPane.showMessageDialog(this,
             "Breakthrough GUI\n\nFront-end for the Breakthrough engine.\n"
@@ -374,6 +536,9 @@ public class Gui extends JFrame implements GameController.Listener {
         try {
             List<Move> moves = GameReplay.loadMoves(p);
             controller.loadGame(moves);
+            // Tags are cleared inside loadGame (it calls newGame's reset path);
+            // load and apply any present in the file *after* the move list.
+            controller.setTags(GameReplay.loadTags(p));
             setTitle("Breakthrough — " + p.getFileName());
         } catch (IOException ex) {
             error("Could not read file: " + ex.getMessage());
@@ -416,7 +581,8 @@ public class Gui extends JFrame implements GameController.Listener {
             // Save into the parent directory; GameWriter generates its own
             // timestamped name. To honor the user's chosen filename, we save
             // and then rename.
-            Path tmp = GameWriter.save(controller.playedMoves(), result, fen, p.getParent());
+            Path tmp = GameWriter.save(controller.playedMoves(), result, fen,
+                                       p.getParent(), controller.tags());
             Files.move(tmp, p, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             setTitle("Breakthrough — " + p.getFileName());
             status.setText("Saved: " + p.getFileName());

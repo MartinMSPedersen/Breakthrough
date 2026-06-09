@@ -13,12 +13,39 @@ make gui      # launch the GUI
 ```
 
 Requires JDK 21 (records, switch expressions, pattern matching). No
-external dependencies — Swing is in the JDK.
+external dependencies - Swing is in the JDK.
 
 The CLI tools from the engine project (`Main play`, `Main analyse`,
 `Main benchmark`, `Tuner`) also work in this directory: `make play`,
 `make bench`, `make tune`, etc. The GUI doesn't depend on them, but
 they're useful for sanity-checking the engine after any changes.
+
+## Distributable AppImage
+
+For handing the GUI to people who don't have Java installed:
+
+```sh
+make appimage
+```
+
+Produces `Breakthrough-GUI-x86_64.AppImage`, a single self-contained
+executable. Bundles a `jlink`-trimmed JRE (~55 MB) so the user
+doesn't need Java on their machine. Run with:
+
+```sh
+chmod +x Breakthrough-GUI-x86_64.AppImage
+./Breakthrough-GUI-x86_64.AppImage
+```
+
+Notes:
+- First `make appimage` downloads `appimagetool` from GitHub into
+  `tools/` (~28 MB). Cached after the first run.
+- Built on x86_64 produces an x86_64 AppImage. For ARM you'd build on
+  ARM with an ARM JDK.
+- The host needs `fuse` to run AppImages — almost every Linux desktop
+  has it, including Xubuntu.
+- `make clean` removes the AppImage and build artifacts but keeps the
+  cached appimagetool. `make dist-clean` removes that too.
 
 ## At a glance
 
@@ -35,6 +62,15 @@ they're useful for sanity-checking the engine after any changes.
 - **Per-engine settings** for depth, TT size, weights, defender scale.
 - **Analyse Mode** runs the engine continuously on the current position,
   streaming each iteration's depth/score/best move.
+- **Annotate Mode** walks through a saved game ply by ply, with the engine
+  evaluating each position and flagging where it disagrees with the played
+  move.
+- **Evaluation Graph** plots score over the played plies in a floating
+  window; click any point in Annotate mode to jump to that ply.
+- **Position editor** for setting up arbitrary boards with a piece palette
+  and side-to-move toggle.
+- **Game tags** (PGN-style metadata: White, Black, Event, Site, Date,
+  Result) editable and saved alongside the game.
 - **Four color themes** — Classic, Slate, High Contrast, Sepia.
 - **Load and save** games (`.game`) and positions (`.fen`); compatible
   with the CLI tools' file formats.
@@ -46,34 +82,57 @@ they're useful for sanity-checking the engine after any changes.
 - **New Game** (Ctrl+N) — reset to the starting position.
 - **Load Game...** (Ctrl+O) — open a saved `.game` file. The moves are
   replayed; if the engine is configured to play the current side, it
-  starts thinking from there.
+  starts thinking from there. Game tags (if any) load from the file's
+  comment block.
 - **Load Position...** — load a FEN-style `.fen` file. Move history is
   cleared (we don't know what led to the position).
 - **Save Game...** (Ctrl+S) — save the played moves. Defaults to a
   timestamped filename like `breakthrough-2026-05-25_22-15-30.game` in
-  `./saves/`. Same format as the CLI's autosave.
+  `./saves/`. Tags (if set via Edit → Edit Tags) are written as `# Tag:
+  value` lines at the top.
 - **Save Position...** — write the current FEN to a `.fen` file.
 - **Quit** (Ctrl+Q).
+
+### Edit
+
+- **Edit Tags** — PGN-style metadata dialog. Six rows: White, Black,
+  Event, Site, Date, Result. All optional, free-form. Blank values get
+  dropped on save. Loaded games auto-populate their tags here.
+- **Edit Position** — enter a position editor where clicks place pieces
+  on the board rather than moving them. A south-bar toolbar appears:
+
+  - **Place: White / Black / Empty** — palette radio. Next click sets
+    the square to this piece (or clears it).
+  - **Flip side to move** — toggle who plays from the edited position.
+  - **Clear board** — empty all squares.
+  - **Reset to start** — restore the standard starting layout.
+  - **OK** — commit; move history is cleared.
+  - **Cancel** — restore the board and history that existed when you
+    entered the editor.
 
 ### View
 
 - **Flip View** — rotate the board 180°. Coordinate labels follow.
 - **Coordinates** (default on) — show file letters and rank numbers.
 - **Engine Output** (default on) — toggle the right-side output panel.
-- **Evaluation Graph** — stub, see "Not yet" below.
+- **Evaluation Graph** — toggle a floating window plotting the engine's
+  score across the game. The Y-axis auto-scales (±1k, ±2k, ±5k...) so
+  quiet games show detail and dramatic games still fit. Click any point
+  in Annotate Mode to jump to that ply.
 - **Colors** — submenu with four theme presets:
   - **Classic** — warm brown wood (default).
   - **Slate** — cool gray-blue, modern.
   - **High Contrast** — pure white squares, dark gray squares, bright
-    primary-color highlights, white piece edges. Accessibility-oriented.
+    primary-color highlights, opposite-color piece edges so pieces
+    are visible on every square. Accessibility-oriented.
   - **Sepia** — cream and caramel, low-glare for long sessions.
   
-  Themes affect the board and the engine output panel; menu chrome and
-  dialogs use the system look-and-feel.
+  Themes affect the board, engine output panel, and evaluation graph;
+  menu chrome and dialogs use the system look-and-feel.
 
 ### Mode
 
-Four radio-button modes; the active one drives gameplay.
+Five radio-button modes; the active one drives gameplay.
 
 - **Machine Player 1** — engine plays White, you play Black.
 - **Machine Player 2** — you play White, engine plays Black (default).
@@ -82,21 +141,29 @@ Four radio-button modes; the active one drives gameplay.
   emitting an iteration to the output panel for each depth. You can
   click pieces for either side to explore variations; analysis
   restarts on the new position. Leaving this mode cancels the search.
-
-The fifth menu item, **Annotate Game**, is a placeholder — see "Not
-yet" below.
+- **Annotate Game** — opens a file chooser; pick a `.game` file. The
+  board resets to the starting position and a step toolbar appears
+  below it (`|<  <  ply N / M  >  >|`). Use the buttons or **Left/Right/
+  Home/End** arrow keys to step. At each ply the engine analyzes the
+  position in the background and notes whether it agrees with the
+  played move. Results are cached so revisiting a ply is instant.
+  Click-to-move is disabled — you're inspecting history.
 
 ### Engine
 
 - **Machine Player 1 Settings...** — open a dialog editing the White
   engine's depth (1-15), TT size in bits (16-26, with live RAM hint),
-  evaluator weights, and defender scale.
+  evaluator weights, and defender scale. Defaults: depth 8, TT bits 24
+  (16M entries, ~512 MB).
 - **Machine Player 2 Settings...** — same for the Black engine.
 - **Reset to default Settings** — restore both engines to the
   compiled-in defaults.
 
 ### Help
 
+- **Rules** — open the Breakthrough Wikipedia page in your default
+  browser. Falls back to `xdg-open`, then to showing the URL in a
+  dialog if neither works.
 - **About** — version blurb.
 
 ## Engine output panel
@@ -128,10 +195,12 @@ is timestamped and labeled:
 Four fields:
 
 - **Search depth** — spinner, 1 to 15. Higher = stronger but slower.
-  6 is interactive; 8-10 is much stronger; 11+ takes noticeable time.
+  Default 8. 6 is interactive (sub-second); 8-10 is much stronger
+  (1-10 seconds); 11+ takes noticeable time but plays beautifully.
 - **TT size (bits)** — spinner, 16 to 26 (2^N entries). Bigger TT
   helps at deep search; a live hint shows the implied RAM. Default
-  20 (1M entries, ~32 MB) suits depth ≤10.
+  24 (16M entries, ~512 MB), comfortable for depth ≤12. Drop to 20
+  (1M entries, ~32 MB) on memory-constrained machines.
 - **Evaluator weights** — text field, eight comma-separated integers
   (one per advancement row). Validated on OK; bad input re-opens the
   dialog with the same values for editing.
@@ -146,17 +215,24 @@ them play each other.
 ## How it's wired
 
 - `Gui.java` — JFrame, menu bar, status bar, JSplitPane holding the
-  board on the left and the engine output panel on the right.
+  board on the left and the engine output panel on the right. Renders
+  the app window icon by rendering a small board snapshot at startup.
+  Owns the south-bar toolbars (Annotate / Edit-Position) that swap in
+  depending on mode.
 - `BoardPanel.java` — custom-painted 8×8 board. Handles click-to-move,
   drag-and-drop, highlight overlays, coordinate labels. Stateless
   beyond what the controller hands it (plus transient drag state).
 - `EngineOutputPanel.java` — JTextArea in a JScrollPane with
   timestamping, MP1/MP2 labeling, and a line cap.
+- `EvalGraphPanel.java` — custom-painted evaluation chart. Lives in a
+  non-modal JDialog so the user can position it independently. Y-axis
+  auto-scales to fit the data; clicks on points jump to that ply in
+  Annotate Mode.
 - `EngineSettingsDialog.java` — modal settings form, validated on OK.
 - `EngineSettings.java` — value type holding depth/TT/weights/scale;
   builds an `Evaluator` and `Search` on demand.
-- `Theme.java` — value class bundling the 12 themable colors, plus
-  four preset palettes.
+- `Theme.java` — value class bundling all themable colors, plus four
+  preset palettes.
 - `GameController.java` — the glue between view and engine. Holds the
   live `Board` and move history. Decides what clicks mean. Runs the
   engine on background threads (SwingWorker for normal play, a daemon
@@ -200,8 +276,12 @@ poisoning future searches with half-explored entries.
 The same formats the CLI uses, so files are interchangeable.
 
 **Game file** (`.game`): free-form text with move tokens like `b2b3`,
-optional `#` comments, and an optional header block (saved date, ply
-count, result). One token per ply, whitespace-separated.
+optional `#` comments, and an optional header block. The header may
+include both auto-generated entries (`# Saved: ...`, `# Plies: N`,
+`# Final FEN: ...`) and user-supplied tags from Edit → Edit Tags
+(`# White: ...`, `# Date: ...`, etc.). Move tokens — one per ply,
+whitespace-separated — make up the body. The CLI tools and the GUI
+both read and write this format; tags are preserved across round-trips.
 
 **Position file** (`.fen`): one line of FEN-style notation, e.g.
 `OOOOOOOO/OOOOOOOO/8/8/8/8/XXXXXXXX/XXXXXXXX W`. Ranks from 8 down to
@@ -209,30 +289,25 @@ count, result). One token per ply, whitespace-separated.
 trailing `W` or `B` is the side to move. Optional `#` comments are
 ignored.
 
-## Not yet
-
-- **Edit → Edit Tags**, **Edit → Edit Position** — stubs.
-- **Mode → Annotate Game** — stub. The intended behavior is to load a
-  saved game and walk through it ply by ply, with the engine
-  evaluating each position and pointing out moves where its best
-  diverges from the game move.
-- **View → Evaluation Graph** — stub. A small chart of the engine's
-  evaluation across the played moves.
-
 ## Layout
 
 ```
 Breakthrough-GUI/
 ├── Makefile
 ├── README.md
+├── packaging/
+│   ├── AppRun                       AppImage launcher script
+│   └── breakthrough-gui.desktop     .desktop file for the AppImage
 ├── src/
 │   ├── Gui.java                    GUI entry point, menus, status bar
 │   ├── BoardPanel.java             Custom-painted board (click + drag)
 │   ├── EngineOutputPanel.java      Right-side scrolling output panel
+│   ├── EvalGraphPanel.java         Floating evaluation graph
 │   ├── EngineSettings.java         Per-engine config value type
 │   ├── EngineSettingsDialog.java   Modal settings dialog
 │   ├── GameController.java         View ↔ engine glue, threading
 │   ├── Theme.java                  Color themes
+│   ├── IconGen.java                Build-time icon generator
 │   │
 │   ├── Bitboards.java              ── Engine, copied from CLI project ──
 │   ├── Board.java

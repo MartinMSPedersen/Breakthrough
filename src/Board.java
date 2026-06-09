@@ -52,6 +52,21 @@ public class Board {
         return EMPTY;
     }
 
+    /**
+     * Place a piece (or empty) at the given square, maintaining the Zobrist
+     * hash. Intended for position-editor use, not for the search hot path.
+     */
+    public void set(int r, int c, byte piece) {
+        long m = Bitboards.bit(r, c);
+        int sq = r * 8 + c;
+        // First remove whatever was here.
+        if ((white & m) != 0) { white &= ~m; hash ^= Zobrist.PIECE_SQ[WHITE][sq]; }
+        if ((black & m) != 0) { black &= ~m; hash ^= Zobrist.PIECE_SQ[BLACK][sq]; }
+        // Then add the new piece (if any).
+        if (piece == WHITE) { white |= m; hash ^= Zobrist.PIECE_SQ[WHITE][sq]; }
+        else if (piece == BLACK) { black |= m; hash ^= Zobrist.PIECE_SQ[BLACK][sq]; }
+    }
+
     public byte side()               { return side; }
     public void setSide(byte s)      {
         if (side != s) hash ^= Zobrist.SIDE_BLACK;

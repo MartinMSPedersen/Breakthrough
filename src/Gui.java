@@ -56,6 +56,12 @@ public class Gui extends JFrame implements GameController.Listener {
     /** What the next click in edit-mode will place. WHITE/BLACK/EMPTY (byte). */
     private byte    editPalette = Board.WHITE;
 
+    /* Analyse navigation toolbar — south of the board, visible only in Analyse
+     * mode when a game is loaded so the user can step through plies. */
+    private JPanel  analyseNavBar;
+    private JButton btnAnaStart, btnAnaPrev, btnAnaNext, btnAnaEnd;
+    private JLabel  analyseNavLabel;
+
     /* Last-used directories for the file choosers, remembered for the
      * lifetime of this window. Initialized lazily on first open/save so we
      * default to ./saves and ./positions if those exist. */
@@ -83,16 +89,19 @@ public class Gui extends JFrame implements GameController.Listener {
         split.setDividerSize(6);
         add(split, BorderLayout.CENTER);
 
-        // Annotate and Edit-Position toolbars: hidden by default, only one
-        // appears at a time depending on mode.
+        // Annotate, Edit-Position, and Analyse-nav toolbars: hidden by
+        // default, only one appears at a time depending on mode.
         annotateBar = buildAnnotateBar();
         annotateBar.setVisible(false);
         editPosBar = buildEditPosBar();
         editPosBar.setVisible(false);
-        // Both go on top of the status line via a small vertical Box.
+        analyseNavBar = buildAnalyseNavBar();
+        analyseNavBar.setVisible(false);
+        // All three go on top of the status line via a small vertical Box.
         Box bars = Box.createVerticalBox();
         bars.add(annotateBar);
         bars.add(editPosBar);
+        bars.add(analyseNavBar);
         southStack = new JPanel(new BorderLayout());
         southStack.add(bars,   BorderLayout.NORTH);
         southStack.add(status, BorderLayout.SOUTH);
@@ -150,6 +159,11 @@ public class Gui extends JFrame implements GameController.Listener {
         evalGraphMenuItem.setToolTipText("Show or hide the evaluation graph window");
         evalGraphMenuItem.addActionListener(e -> setEvalGraphVisible(evalGraphMenuItem.isSelected()));
         view.add(evalGraphMenuItem);
+        JCheckBoxMenuItem showPv = new JCheckBoxMenuItem("Show PV during game", false);
+        showPv.setToolTipText("Include the principal variation (engine's planned line) in engine output during play. "
+                            + "Analyse mode always shows the PV.");
+        showPv.addActionListener(e -> controller.setShowPvDuringGame(showPv.isSelected()));
+        view.add(showPv);
         view.add(buildColorsMenu());
         mb.add(view);
 
@@ -687,6 +701,24 @@ public class Gui extends JFrame implements GameController.Listener {
         // revalidate so the toolbar appearing/disappearing is reflected.
         southStack.revalidate();
     }
+    @Override public void analyseNavStateChanged(int ply, int totalPlies) {
+        boolean show = totalPlies > 0 && controller.mode() == GameController.Mode.ANALYSE;
+        analyseNavBar.setVisible(show);
+        if (show) {
+            int moveNum = (ply + 1) / 2;
+            String label;
+            if (ply == 0)                       label = "before move 1";
+            else if (ply >= totalPlies)         label = "end of game";
+            else if ((ply & 1) == 1)            label = "after " + moveNum + ". White";
+            else                                label = "after " + moveNum + "... Black";
+            analyseNavLabel.setText("ply " + ply + " / " + totalPlies + "   (" + label + ")");
+            btnAnaStart.setEnabled(ply > 0);
+            btnAnaPrev .setEnabled(ply > 0);
+            btnAnaNext .setEnabled(ply < totalPlies);
+            btnAnaEnd  .setEnabled(ply < totalPlies);
+        }
+        southStack.revalidate();
+    }
     @Override public void annotateResult(int ply, Move played, Search.Result r, boolean agrees) {
         String tag = agrees ? "engine agrees" : ("engine prefers " + r.bestMove);
         String line = String.format("Ply %d: played %s — depth %d score %+d  (%s)",
@@ -746,6 +778,31 @@ public class Gui extends JFrame implements GameController.Listener {
         return bar;
     }
 
+    /** Analyse-mode step bar — only shown when a game is loaded so the user
+     *  can walk back/forward through its plies while analysing each position. */
+    private JPanel buildAnalyseNavBar() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 4));
+        bar.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(0xA0, 0xA0, 0xA0)));
+        btnAnaStart = new JButton("|<");  btnAnaStart.setToolTipText("Go to start (Home)");
+        btnAnaPrev  = new JButton("<");   btnAnaPrev .setToolTipText("Previous ply (\u2190)");
+        btnAnaNext  = new JButton(">");   btnAnaNext .setToolTipText("Next ply (\u2192)");
+        btnAnaEnd   = new JButton(">|");  btnAnaEnd  .setToolTipText("Go to end (End)");
+        analyseNavLabel = new JLabel(" ");
+        analyseNavLabel.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
+
+        btnAnaStart.addActionListener(e -> controller.analyseGotoInGame(0));
+        btnAnaPrev .addActionListener(e -> controller.analyseStepInGame(-1));
+        btnAnaNext .addActionListener(e -> controller.analyseStepInGame(+1));
+        btnAnaEnd  .addActionListener(e -> controller.analyseGotoInGame(controller.analyseGameTotal()));
+
+        bar.add(btnAnaStart);
+        bar.add(btnAnaPrev);
+        bar.add(analyseNavLabel);
+        bar.add(btnAnaNext);
+        bar.add(btnAnaEnd);
+        return bar;
+    }
+
     /** Install keyboard shortcuts for stepping. Wired into the frame's root
      *  pane so they fire regardless of which child has focus, but only when
      *  we're in Annotate Mode. */
@@ -753,21 +810,31 @@ public class Gui extends JFrame implements GameController.Listener {
         JRootPane rp = getRootPane();
         InputMap  im = rp.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
         ActionMap am = rp.getActionMap();
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_LEFT,  0), "ann-prev");
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0), "ann-next");
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_HOME,  0), "ann-start");
-        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_END,   0), "ann-end");
-        am.put("ann-prev",  new AbstractAction() { public void actionPerformed(ActionEvent e) {
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_LEFT,  0), "step-prev");
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0), "step-next");
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_HOME,  0), "step-start");
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_END,   0), "step-end");
+        // The same keys drive both Annotate and Analyse-with-game navigation;
+        // we dispatch based on current mode.
+        am.put("step-prev",  new AbstractAction() { public void actionPerformed(ActionEvent e) {
             if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateStep(-1);
+            else if (controller.mode() == GameController.Mode.ANALYSE && controller.analyseGameTotal() > 0)
+                controller.analyseStepInGame(-1);
         }});
-        am.put("ann-next",  new AbstractAction() { public void actionPerformed(ActionEvent e) {
+        am.put("step-next",  new AbstractAction() { public void actionPerformed(ActionEvent e) {
             if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateStep(+1);
+            else if (controller.mode() == GameController.Mode.ANALYSE && controller.analyseGameTotal() > 0)
+                controller.analyseStepInGame(+1);
         }});
-        am.put("ann-start", new AbstractAction() { public void actionPerformed(ActionEvent e) {
+        am.put("step-start", new AbstractAction() { public void actionPerformed(ActionEvent e) {
             if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateGoto(0);
+            else if (controller.mode() == GameController.Mode.ANALYSE && controller.analyseGameTotal() > 0)
+                controller.analyseGotoInGame(0);
         }});
-        am.put("ann-end",   new AbstractAction() { public void actionPerformed(ActionEvent e) {
+        am.put("step-end",   new AbstractAction() { public void actionPerformed(ActionEvent e) {
             if (controller.mode() == GameController.Mode.ANNOTATE) controller.annotateGoto(controller.annotateTotal());
+            else if (controller.mode() == GameController.Mode.ANALYSE && controller.analyseGameTotal() > 0)
+                controller.analyseGotoInGame(controller.analyseGameTotal());
         }});
     }
 

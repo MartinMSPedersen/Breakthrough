@@ -47,6 +47,9 @@ public class GameController {
         default void annotateResult(int ply, Move played, Search.Result engineResult, boolean agrees) {}
         /** Annotate state changed (current ply, total plies). Triggers toolbar updates. */
         default void annotateStateChanged(int ply, int totalPlies) {}
+        /** Analyse-mode navigation state changed. totalPlies > 0 means the
+         *  GUI should show step controls; totalPlies == 0 means hide them. */
+        default void analyseNavStateChanged(int ply, int totalPlies) {}
         /** Play / Two Machines: an engine search just completed and its move
          *  is about to be applied. ply is 1-based (the ply about to be played).
          *  side is the side whose move it is. Useful for graphing evaluation. */
@@ -71,13 +74,24 @@ public class GameController {
      *  Whichever side the engine controls reads its settings here. */
     private EngineSettings whiteSettings = EngineSettings.defaults();
     private EngineSettings blackSettings = EngineSettings.defaults();
-    /** Maximum depth used by Analyse Mode. Capped to prevent runaway memory. */
-    private int analyseMaxDepth = 14;
+    /** Maximum depth used by Analyse Mode. Set near Search.MAX_PLY so Analyse
+     *  effectively runs as deep as it can; the mate-stop, the cancel flag,
+     *  and the user's patience are what actually terminate it. */
+    private int analyseMaxDepth = 99;
     /** Cancel flag for the currently running Analyse search, if any. The
      *  controller sets this true to stop the running analysis, then clears
      *  it (allocates a fresh AtomicBoolean) before starting a new one. */
     private java.util.concurrent.atomic.AtomicBoolean analyseCancel
         = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Analyse-mode navigation. When a game is "in progress" (playedMoves
+     *  non-empty) at Analyse entry, we snapshot those moves into
+     *  analyseGameMoves and set analyseGamePly = playedMoves.size(). The GUI
+     *  then shows a step toolbar; stepping rebuilds the board to that ply and
+     *  restarts the search. Playing any move clears the snapshot (the user
+     *  is now exploring a variation). */
+    private java.util.List<Move> analyseGameMoves = new java.util.ArrayList<>();
+    private int                  analyseGamePly   = 0;
 
     /** Annotate state. annotateMoves holds the full sequence of plies from the
      *  loaded game. annotatePly is the index of the *next* ply to be played
@@ -93,6 +107,11 @@ public class GameController {
 
     /** True between SwingWorker.start and done. EDT-only. */
     private boolean thinkingNow = false;
+    /** Whether to include the principal variation in play-mode engine output
+     *  lines. Off by default; toggled by View → "Show PV during game". */
+    private boolean showPvDuringGame = false;
+    public void setShowPvDuringGame(boolean v) { this.showPvDuringGame = v; }
+    public boolean isShowPvDuringGame() { return showPvDuringGame; }
     /**
      * Generation token. Bumped whenever state is reset (newGame, setSides,
      * loadGame, loadPosition). A worker snapshots the current generation at
@@ -256,19 +275,57 @@ public class GameController {
         currentGeneration++;        // invalidates any normal-play workers in flight
         thinkingNow = false;
         if (oldMode == Mode.ANNOTATE) {
-            // Leaving Annotate: reset to a fresh starting position.
+            // Leaving Annotate: KEEP the currently-displayed position, AND
+            // promote the annotated game into playedMoves so step navigation
+            // works in the next mode (especially Analyse). We keep the full
+            // game's move list; the current "ply position" is captured via
+            // analyseGamePly below for Analyse, or just used for the last-move
+            // highlight otherwise.
+            int wasAtPly = annotatePly;
+            java.util.List<Move> moves = new java.util.ArrayList<>(annotateMoves);
             annotateMoves.clear();
             annotateCache.clear();
             annotatePly = 0;
-            board = Board.initial();
             playedMoves.clear();
-            lastFromSq = -1; lastToSq = -1;
-            fireBoardChanged();
+            playedMoves.addAll(moves);
+            // Preserve the analyse-stepping notion of "where we are":
+            // we'll set this below when entering ANALYSE.
+            // board, lastFromSq, lastToSq stay as they are.
             fireAnnotateStateChanged();
+
+            // If switching directly into ANALYSE, seed analyseGamePly to the
+            // ply we were viewing, not the end. (The general "snapshot
+            // playedMoves" branch below runs after this and uses
+            // playedMoves.size() — but for the annotate→analyse case we
+            // want the *current* viewing ply.)
+            if (newMode == Mode.ANALYSE) {
+                analyseGameMoves = new java.util.ArrayList<>(moves);
+                analyseGamePly   = wasAtPly;
+                // Trim playedMoves to the viewing prefix, consistent with
+                // analyseGotoInGame's contract that playedMoves matches the
+                // currently-displayed board.
+                playedMoves.clear();
+                playedMoves.addAll(moves.subList(0, wasAtPly));
+                fireAnalyseNavStateChanged();
+                startAnalyse();
+                updateStatus();
+                return;
+            }
         }
         if (mode == Mode.ANALYSE) {
+            // Snapshot the played moves so the GUI can offer step navigation
+            // through them. analyseGamePly starts at the end (current position).
+            analyseGameMoves = new java.util.ArrayList<>(playedMoves);
+            analyseGamePly   = analyseGameMoves.size();
+            fireAnalyseNavStateChanged();
             startAnalyse();
         } else {
+            // Leaving Analyse: clear the navigation snapshot if it was set.
+            if (!analyseGameMoves.isEmpty()) {
+                analyseGameMoves.clear();
+                analyseGamePly = 0;
+                fireAnalyseNavStateChanged();
+            }
             maybeKickEngine();
         }
         updateStatus();
@@ -346,6 +403,45 @@ public class GameController {
     public int  annotateTotal()         { return annotateMoves.size(); }
     public java.util.List<Move> annotateMoves() {
         return java.util.Collections.unmodifiableList(annotateMoves);
+    }
+
+    /* ----- Analyse-mode navigation ----- */
+
+    public void analyseStepInGame(int delta) { analyseGotoInGame(analyseGamePly + delta); }
+    public int  analyseGamePly()              { return analyseGamePly; }
+    public int  analyseGameTotal()            { return analyseGameMoves.size(); }
+
+    /** Step to a specific ply in the loaded game. 0 = starting position; N
+     *  = after Nth ply. Out-of-range values are clamped. No-op if not in
+     *  Analyse mode or no game is loaded. */
+    public void analyseGotoInGame(int newPly) {
+        if (mode != Mode.ANALYSE) return;
+        if (analyseGameMoves.isEmpty()) return;
+        newPly = Math.max(0, Math.min(newPly, analyseGameMoves.size()));
+        if (newPly == analyseGamePly) return;
+        stopAnalyse();
+        currentGeneration++;
+        // Rebuild board at the requested ply.
+        Board b = Board.initial();
+        for (int i = 0; i < newPly; i++) b.apply(analyseGameMoves.get(i));
+        board = b;
+        analyseGamePly = newPly;
+        // Keep playedMoves in sync — it's "the moves leading to the displayed
+        // board", which is exactly the prefix up to newPly.
+        playedMoves.clear();
+        playedMoves.addAll(analyseGameMoves.subList(0, newPly));
+        if (newPly > 0) {
+            Move m = analyseGameMoves.get(newPly - 1);
+            lastFromSq = m.fromRow() * 8 + m.fromCol();
+            lastToSq   = m.toRow()   * 8 + m.toCol();
+        } else {
+            lastFromSq = -1; lastToSq = -1;
+        }
+        selectedSq = -1; destinations = 0L;
+        fireBoardChanged();
+        fireAnalyseNavStateChanged();
+        updateStatus();
+        startAnalyse();
     }
 
     /** Start the engine analyzing the *current* position (the one shown on
@@ -646,6 +742,14 @@ public class GameController {
         }
         updateStatus();
         if (mode == Mode.ANALYSE) {
+            // Playing a move in Analyse mode counts as "exploring a variation".
+            // Drop the navigation snapshot so the step toolbar disappears —
+            // we don't try to reconcile played-variations against the snapshot.
+            if (!analyseGameMoves.isEmpty()) {
+                analyseGameMoves.clear();
+                analyseGamePly = 0;
+                fireAnalyseNavStateChanged();
+            }
             stopAnalyse();
             currentGeneration++;   // invalidate any in-flight analyse callbacks
             startAnalyse();
@@ -686,8 +790,28 @@ public class GameController {
                 long t0 = System.currentTimeMillis();
                 Search.Result r = s.findBest(copy, cfg.depth);
                 long ms = System.currentTimeMillis() - t0;
-                publish(String.format("depth=%d  best=%s  score=%+d  nodes=%d  %d ms",
-                                       r.depth, r.bestMove, r.score, r.nodes, ms));
+                String moveStr;
+                if (showPvDuringGame) {
+                    // Extract PV from the just-finished search; TT entries are
+                    // intact since we're between iteration callbacks (none here)
+                    // and the next search hasn't started.
+                    java.util.List<Move> pv = s.extractPv(copy, 3);
+                    if (pv.isEmpty()) {
+                        moveStr = (r.bestMove == null) ? "(none)" : r.bestMove.toString();
+                    } else {
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = 0; i < pv.size(); i++) {
+                            if (i > 0) sb.append(' ');
+                            sb.append(pv.get(i));
+                        }
+                        moveStr = sb.toString();
+                    }
+                    publish(String.format("depth=%d  pv=%s  score=%+d  nodes=%d  %d ms",
+                                           r.depth, moveStr, r.score, r.nodes, ms));
+                } else {
+                    publish(String.format("depth=%d  best=%s  score=%+d  nodes=%d  %d ms",
+                                           r.depth, r.bestMove, r.score, r.nodes, ms));
+                }
                 return r;
             }
             @Override protected void process(List<String> lines) {
@@ -741,9 +865,22 @@ public class GameController {
             Search s = cfg.buildSearch();
             s.findBest(copy, maxDepth, myCancel::get, res -> {
                 if (generation != currentGeneration) return;
+                // Extract the principal variation now, while the TT still holds
+                // this iteration's entries. The next iteration would overwrite.
+                // Show up to 3 plies: best move + two follow-ups.
+                java.util.List<Move> pv = s.extractPv(copy, 3);
+                StringBuilder pvStr = new StringBuilder();
+                if (pv.isEmpty()) {
+                    pvStr.append(res.bestMove == null ? "(none)" : res.bestMove.toString());
+                } else {
+                    for (int i = 0; i < pv.size(); i++) {
+                        if (i > 0) pvStr.append(' ');
+                        pvStr.append(pv.get(i).toString());
+                    }
+                }
                 String line = String.format(
-                    "(analyse) depth=%d  best=%s  score=%+d  nodes=%d  %d ms",
-                    res.depth, res.bestMove, res.score, res.nodes, res.ms);
+                    "(analyse) depth=%d  pv=%s  score=%+d  nodes=%d  %d ms",
+                    res.depth, pvStr, res.score, res.nodes, res.ms);
                 SwingUtilities.invokeLater(() -> {
                     if (generation != currentGeneration) return;
                     if (listener != null) listener.engineProgress(searchSide, line);
@@ -772,6 +909,9 @@ public class GameController {
     private void fireAnnotateResult(int ply, Move played, Search.Result r) {
         boolean agrees = r.bestMove != null && r.bestMove.toString().equals(played.toString());
         if (listener != null) listener.annotateResult(ply, played, r, agrees);
+    }
+    private void fireAnalyseNavStateChanged() {
+        if (listener != null) listener.analyseNavStateChanged(analyseGamePly, analyseGameMoves.size());
     }
     private void updateStatus() {
         if (listener == null) return;

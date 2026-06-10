@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Breakthrough
-Comment=Breakthrough board game with a strong AI opponent
-Exec=AppRun
-Icon=breakthrough-gui
-Terminal=false
-Categories=Game;BoardGame;

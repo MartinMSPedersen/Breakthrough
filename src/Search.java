@@ -154,6 +154,40 @@ public final class Search {
         }
     }
 
+    /**
+     * Extract the principal variation (sequence of best moves) by walking the
+     * transposition table from the given start position. Each move is verified
+     * against the legal-move generator at its position, since TT entries can
+     * collide (a wrong move retrieved from a hash collision would be illegal
+     * here and we just stop).
+     *
+     * The walk stops at maxLength moves, at terminal positions, at TT misses,
+     * at illegal probes, or at cycles (the same position recurring within the
+     * walk). Returns a fresh list; the caller's Board is not mutated.
+     */
+    public java.util.List<Move> extractPv(Board start, int maxLength) {
+        java.util.List<Move> pv = new java.util.ArrayList<>();
+        Board b = Board.fromFen(start.toFen());
+        java.util.HashSet<Long> seen = new java.util.HashSet<>();
+        int[] buf = new int[MoveGenerator.MAX_MOVES];
+        for (int i = 0; i < maxLength; i++) {
+            if (b.winner() != Board.EMPTY) break;
+            if (!seen.add(b.hash())) break;             // cycle protection
+            TT.Entry e = tt.probe(b.hash());
+            if (e == null) break;
+            int packed = e.bestMove;
+            if (packed == Move.NONE) break;
+            int n = MoveGenerator.generate(b, buf);
+            boolean legal = false;
+            for (int k = 0; k < n; k++) if (buf[k] == packed) { legal = true; break; }
+            if (!legal) break;                          // TT collision
+            Move m = Move.unpack(packed);
+            pv.add(m);
+            b.apply(m);
+        }
+        return pv;
+    }
+
     /** Record a quiet move that caused a beta cutoff at this ply. */
     private void rememberKiller(int ply, int packedMove) {
         if (ply >= MAX_PLY) return;

@@ -269,9 +269,18 @@ public final class Search {
          * good (which it usually is — TT move, captures, killers come first)
          * the scout-then-skip case dominates and the search is faster overall.
          *
-         * Re-searches are skipped at depth 1 because there's no proper
-         * recursion below them; the zero-window value is already final
-         * (it's just a quiescence score with a beta cutoff at alpha+1).
+         * IMPORTANT: a fail-high scout result is a BOUND (alpha+1 in
+         * fail-hard), never an exact score, so it must ALWAYS be verified
+         * by a full-window re-search — including at depth 1, where the
+         * re-search is just a cheap windowed quiescence. An earlier version
+         * skipped the re-search at depth 1 on the false assumption that
+         * the zero-window value was "already final"; this recorded garbage
+         * bound values as real scores and, in positions where the first
+         * move loses to a forced win, produced false mate scores at the
+         * root (each later scout "improving" the fake best by exactly +1,
+         * the last sibling winning the bestMove slot). Found via a real
+         * game where the engine chose a losing quiet move over the only
+         * saving capture. Do not reintroduce the depth condition.
          */
         int bestMove  = moves[0];
         int bestScore = -Evaluator.MAX_SCORE;
@@ -299,7 +308,7 @@ public final class Search {
             } else {
                 // Scout search with a null (zero-width) window.
                 s = -negamax(b, depth - 1, ply + 1, -alpha - 1, -alpha);
-                if (s > alpha && s < beta && depth > 1) {
+                if (s > alpha && s < beta) {
                     // Scout failed high but didn't already cause a beta cutoff:
                     // re-search with the full window to get the exact value.
                     s = -negamax(b, depth - 1, ply + 1, -beta, -alpha);
@@ -357,7 +366,11 @@ public final class Search {
         if (standPat > alpha) alpha = standPat;
 
         int[] caps = moveBuf[ply];
-        int   n    = MoveGenerator.generateCaptures(b, caps);
+        // Captures AND quiet winning pushes (moves to the goal rank). A
+        // capture-only quiescence is unsound in Breakthrough: the winning
+        // move is usually quiet, so a runner one step from the goal would
+        // be invisible to the search at the horizon.
+        int   n    = MoveGenerator.generateQuiescence(b, caps);
         if (n == 0) return alpha;
 
         // Simple ordering: by destination advancement (closer to home row = better).

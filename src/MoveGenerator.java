@@ -46,6 +46,41 @@ public final class MoveGenerator {
         return generate(b, out, 0, true);
     }
 
+    /**
+     * Quiescence move set: captures PLUS quiet "winning pushes" — non-capture
+     * moves landing on the opponent's home rank. Reaching that rank wins the
+     * game instantly, so these are the Breakthrough equivalent of promotions
+     * in chess quiescence. A capture-only quiescence is blind to them: a piece
+     * one step from the goal "looks" harmless unless its winning move happens
+     * to be a capture, which causes severe horizon artifacts (the engine sees
+     * the capture-win g7xh8 but not the quiet win g7-h8, mis-scoring entire
+     * subtrees). Found via a real game blunder.
+     */
+    public static int generateQuiescence(Board b, int[] out) {
+        int idx = generate(b, out, 0, true);   // all captures first
+        final long own   = (b.side() == Board.WHITE) ? b.whiteBits() : b.blackBits();
+        final long opp   = (b.side() == Board.WHITE) ? b.blackBits() : b.whiteBits();
+        final long empty = ~(own | opp);
+        if (b.side() == Board.WHITE) {
+            final long GOAL = 0xFF00000000000000L;          // rank 8 (rows are 0-based from rank 1)
+            long fwd   = ((own << 8)                & empty) & GOAL;
+            long diagL = (((own & NOT_FILE_A) << 7) & empty) & GOAL;
+            long diagR = (((own & NOT_FILE_H) << 9) & empty) & GOAL;
+            idx = emit(out, idx, fwd,   -8);
+            idx = emit(out, idx, diagL, -7);
+            idx = emit(out, idx, diagR, -9);
+        } else {
+            final long GOAL = 0xFFL;                        // rank 1
+            long fwd   = ((own >>> 8)                & empty) & GOAL;
+            long diagL = (((own & NOT_FILE_H) >>> 7) & empty) & GOAL;
+            long diagR = (((own & NOT_FILE_A) >>> 9) & empty) & GOAL;
+            idx = emit(out, idx, fwd,   +8);
+            idx = emit(out, idx, diagL, +7);
+            idx = emit(out, idx, diagR, +9);
+        }
+        return idx;
+    }
+
     private static int generate(Board b, int[] out, int offset, boolean capturesOnly) {
         final long own  = (b.side() == Board.WHITE) ? b.whiteBits() : b.blackBits();
         final long opp  = (b.side() == Board.WHITE) ? b.blackBits() : b.whiteBits();

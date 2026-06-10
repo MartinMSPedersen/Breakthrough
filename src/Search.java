@@ -47,6 +47,17 @@ public final class Search {
     /** Killer moves: two slots per ply. Move.NONE means empty. */
     private final int[][] killers       = new int[MAX_PLY][2];
 
+    /** Triangular PV table: pv[ply] holds the PV starting at that ply.
+     *  pv[ply][0] is the best move at this ply; pv[ply][1..] is the
+     *  continuation. pvLen[ply] is how many slots are valid.
+     *  Used to construct the full principal variation during search;
+     *  more reliable than walking the TT (which loses PV when entries
+     *  get overwritten by later, deeper, unrelated probes). */
+    private final int[][] pvTable        = new int[MAX_PLY][MAX_PLY];
+    private final int[]   pvLen          = new int[MAX_PLY];
+    /** The PV from root after the last completed iteration. Used by extractPv. */
+    private int[]         rootPv         = new int[0];
+
     /** Default TT size: 2^20 ≈ 1M slots; default evaluator weights; no noise. */
     public Search()                                       { this(20, Evaluator.defaults(), 0, 0L); }
     public Search(int ttBits)                             { this(ttBits, Evaluator.defaults(), 0, 0L); }
@@ -133,6 +144,11 @@ public final class Search {
             bestDepth = d;
             TT.Entry rootE = tt.probe(b.hash());
             if (rootE != null) bestMovePacked = rootE.bestMove;
+            // Snapshot the root PV produced by this iteration. We make a
+            // copy because pvTable[0] gets overwritten by the next iteration.
+            int rootLen = pvLen[0];
+            rootPv = new int[rootLen];
+            System.arraycopy(pvTable[0], 0, rootPv, 0, rootLen);
             // Report this iteration's result.
             Move iterMove = bestMovePacked == Move.NONE ? null : Move.unpack(bestMovePacked);
             long elapsed  = System.currentTimeMillis() - t0;
@@ -155,36 +171,19 @@ public final class Search {
     }
 
     /**
-     * Extract the principal variation (sequence of best moves) by walking the
-     * transposition table from the given start position. Each move is verified
-     * against the legal-move generator at its position, since TT entries can
-     * collide (a wrong move retrieved from a hash collision would be illegal
-     * here and we just stop).
+     * Return the principal variation from the last completed iteration of
+     * findBest, capped at maxLength. The PV is captured during the search
+     * itself (triangular PV table) — far more reliable than walking the TT,
+     * which loses entries to later, deeper, unrelated probes.
      *
-     * The walk stops at maxLength moves, at terminal positions, at TT misses,
-     * at illegal probes, or at cycles (the same position recurring within the
-     * walk). Returns a fresh list; the caller's Board is not mutated.
+     * The startingPosition parameter is currently unused but kept for API
+     * compatibility; the PV is always relative to the root of the most
+     * recent findBest call.
      */
-    public java.util.List<Move> extractPv(Board start, int maxLength) {
+    public java.util.List<Move> extractPv(Board startingPosition, int maxLength) {
         java.util.List<Move> pv = new java.util.ArrayList<>();
-        Board b = Board.fromFen(start.toFen());
-        java.util.HashSet<Long> seen = new java.util.HashSet<>();
-        int[] buf = new int[MoveGenerator.MAX_MOVES];
-        for (int i = 0; i < maxLength; i++) {
-            if (b.winner() != Board.EMPTY) break;
-            if (!seen.add(b.hash())) break;             // cycle protection
-            TT.Entry e = tt.probe(b.hash());
-            if (e == null) break;
-            int packed = e.bestMove;
-            if (packed == Move.NONE) break;
-            int n = MoveGenerator.generate(b, buf);
-            boolean legal = false;
-            for (int k = 0; k < n; k++) if (buf[k] == packed) { legal = true; break; }
-            if (!legal) break;                          // TT collision
-            Move m = Move.unpack(packed);
-            pv.add(m);
-            b.apply(m);
-        }
+        int n = Math.min(maxLength, rootPv.length);
+        for (int i = 0; i < n; i++) pv.add(Move.unpack(rootPv[i]));
         return pv;
     }
 
@@ -207,6 +206,7 @@ public final class Search {
         if ((nodes & CANCEL_CHECK_MASK) == 0 && cancel.isCancelled()) {
             throw CANCEL_SENTINEL;
         }
+        if (ply < MAX_PLY) pvLen[ply] = 0;   // assume no PV update at this ply yet
         final int  alphaOrig = alpha;
         final long hash      = b.hash();
 
@@ -309,7 +309,19 @@ public final class Search {
             b.undoPacked(m, cap);
 
             if (s > bestScore) { bestScore = s; bestMove = m; }
-            if (s > alpha)       alpha = s;
+            if (s > alpha) {
+                alpha = s;
+                // PV update: record this move + the child's PV at this ply.
+                if (ply < MAX_PLY) {
+                    pvTable[ply][0] = m;
+                    int childLen = (ply + 1 < MAX_PLY) ? pvLen[ply + 1] : 0;
+                    if (childLen > MAX_PLY - 1 - ply) childLen = MAX_PLY - 1 - ply;
+                    for (int k = 0; k < childLen; k++) {
+                        pvTable[ply][k + 1] = pvTable[ply + 1][k];
+                    }
+                    pvLen[ply] = childLen + 1;
+                }
+            }
             if (alpha >= beta) {
                 if (cap == Board.EMPTY) rememberKiller(ply, m);
                 break;

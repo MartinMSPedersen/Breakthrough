@@ -112,6 +112,12 @@ public class GameController {
     private boolean showPvDuringGame = false;
     public void setShowPvDuringGame(boolean v) { this.showPvDuringGame = v; }
     public boolean isShowPvDuringGame() { return showPvDuringGame; }
+
+    /** Cached Search instance for Analyse Mode so the transposition table
+     *  persists across moves. Reset when engine settings change (different
+     *  weights/TT size mean different Search). */
+    private Search          cachedAnalyseSearch;
+    private EngineSettings  cachedAnalyseSettings;
     /**
      * Generation token. Bumped whenever state is reset (newGame, setSides,
      * loadGame, loadPosition). A worker snapshots the current generation at
@@ -617,11 +623,19 @@ public class GameController {
 
     public EngineSettings whiteSettings() { return whiteSettings; }
     public EngineSettings blackSettings() { return blackSettings; }
-    public void setWhiteSettings(EngineSettings s) { this.whiteSettings = s; }
-    public void setBlackSettings(EngineSettings s) { this.blackSettings = s; }
+    public void setWhiteSettings(EngineSettings s) { this.whiteSettings = s; invalidateCachedAnalyseSearch(); }
+    public void setBlackSettings(EngineSettings s) { this.blackSettings = s; invalidateCachedAnalyseSearch(); }
     public void resetSettings() {
         this.whiteSettings = EngineSettings.defaults();
         this.blackSettings = EngineSettings.defaults();
+        invalidateCachedAnalyseSearch();
+    }
+
+    /** Drop the cached analyse Search so the next analyse run gets a fresh
+     *  one matching the current settings. */
+    private synchronized void invalidateCachedAnalyseSearch() {
+        cachedAnalyseSearch   = null;
+        cachedAnalyseSettings = null;
     }
 
     public Board board() { return board; }
@@ -862,30 +876,47 @@ public class GameController {
 
         Thread t = new Thread(() -> {
             Board copy = Board.fromFen(fen);
-            Search s = cfg.buildSearch();
-            s.findBest(copy, maxDepth, myCancel::get, res -> {
-                if (generation != currentGeneration) return;
-                // Extract the principal variation now, while the TT still holds
-                // this iteration's entries. The next iteration would overwrite.
-                // Show up to 3 plies: best move + two follow-ups.
-                java.util.List<Move> pv = s.extractPv(copy, 3);
-                StringBuilder pvStr = new StringBuilder();
-                if (pv.isEmpty()) {
-                    pvStr.append(res.bestMove == null ? "(none)" : res.bestMove.toString());
-                } else {
-                    for (int i = 0; i < pv.size(); i++) {
-                        if (i > 0) pvStr.append(' ');
-                        pvStr.append(pv.get(i).toString());
-                    }
+            // Get or create the cached Search. The TT inside persists across
+            // analyse runs in this session, so re-analysing a position the
+            // search has seen before benefits from previously-computed entries.
+            Search s;
+            synchronized (this) {
+                if (cachedAnalyseSearch == null || cachedAnalyseSettings != cfg) {
+                    cachedAnalyseSearch   = cfg.buildSearch();
+                    cachedAnalyseSettings = cfg;
                 }
-                String line = String.format(
-                    "(analyse) depth=%d  pv=%s  score=%+d  nodes=%d  %d ms",
-                    res.depth, pvStr, res.score, res.nodes, res.ms);
-                SwingUtilities.invokeLater(() -> {
+                s = cachedAnalyseSearch;
+            }
+            // Synchronize on the Search itself: if a previous analyse thread
+            // is still inside findBest (its cancel flag was set but it hasn't
+            // returned yet), we wait here rather than corrupting Search's
+            // mutable state (nodes counter, killers, callback fields).
+            synchronized (s) {
+                if (myCancel.get()) return;        // cancelled while we waited
+                s.findBest(copy, maxDepth, myCancel::get, res -> {
                     if (generation != currentGeneration) return;
-                    if (listener != null) listener.engineProgress(searchSide, line);
+                    // Extract the principal variation now, while the TT still holds
+                    // this iteration's entries. The next iteration would overwrite.
+                    // Show up to 3 plies: best move + two follow-ups.
+                    java.util.List<Move> pv = s.extractPv(copy, 3);
+                    StringBuilder pvStr = new StringBuilder();
+                    if (pv.isEmpty()) {
+                        pvStr.append(res.bestMove == null ? "(none)" : res.bestMove.toString());
+                    } else {
+                        for (int i = 0; i < pv.size(); i++) {
+                            if (i > 0) pvStr.append(' ');
+                            pvStr.append(pv.get(i).toString());
+                        }
+                    }
+                    String line = String.format(
+                        "(analyse) depth=%d  pv=%s  score=%+d  nodes=%d  %d ms",
+                        res.depth, pvStr, res.score, res.nodes, res.ms);
+                    SwingUtilities.invokeLater(() -> {
+                        if (generation != currentGeneration) return;
+                        if (listener != null) listener.engineProgress(searchSide, line);
+                    });
                 });
-            });
+            }
         }, "BreakthroughAnalyse");
         t.setDaemon(true);
         t.start();
